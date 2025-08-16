@@ -1,0 +1,59 @@
+{
+  "milestones": [
+    {
+      "title": "Milestone 1: Core Embedded Linux & Multithreading",
+      "state": "open",
+      "description": "Build confidence in C++ concurrency & Linux drivers → target Embedded Linux Engineer roles."
+    },
+    {
+      "title": "Milestone 2: GPU & CUDA Programming",
+      "state": "open",
+      "description": "Hands-on with GPU computing → target GPU/Accelerator Software Engineer roles."
+    },
+    {
+      "title": "Milestone 3: AI on Embedded",
+      "state": "open",
+      "description": "Deploy AI on Jetson Nano → target Edge AI Engineer roles."
+    },
+    {
+      "title": "Milestone 4: Robotics / UAV",
+      "state": "open",
+      "description": "ROS2 + PX4 trajectory demos → target Robotics/UAV Engineer roles."
+    }
+  ],
+  "issues": [
+    { "title": "Learn C++ multithreading basics", "milestone": 1 },
+    { "title": "Implement producer-consumer", "milestone": 1 },
+    { "title": "Build a thread pool", "milestone": 1 },
+    { "title": "Explore synchronization primitives", "milestone": 1 },
+    { "title": "Write a simple char driver", "milestone": 1 },
+    { "title": "Add sysfs attributes to driver", "milestone": 1 },
+    { "title": "Handle interrupts in driver", "milestone": 1 },
+    { "title": "Create dummy I2C/SPI driver", "milestone": 1 },
+
+    { "title": "Write CUDA vector addition", "milestone": 2 },
+    { "title": "Implement matrix multiplication", "milestone": 2 },
+    { "title": "Explore CUDA thread blocks & grids", "milestone": 2 },
+    { "title": "Study shared vs global memory", "milestone": 2 },
+    { "title": "Profile kernels with Nsight", "milestone": 2 },
+    { "title": "CUDA grayscale image filter", "milestone": 2 },
+    { "title": "CUDA Sobel edge detection", "milestone": 2 },
+    { "title": "CUDA blur filter", "milestone": 2 },
+
+    { "title": "Learn Python + OpenCV basics", "milestone": 3 },
+    { "title": "Capture video from USB camera", "milestone": 3 },
+    { "title": "Apply OpenCV filters", "milestone": 3 },
+    { "title": "Run ONNX image classification", "milestone": 3 },
+    { "title": "Run YOLOv5 object detection", "milestone": 3 },
+    { "title": "Convert ONNX to TensorRT", "milestone": 3 },
+    { "title": "Benchmark inference performance", "milestone": 3 },
+
+    { "title": "Learn ROS2 publisher/subscriber", "milestone": 4 },
+    { "title": "Implement ROS2 service & action", "milestone": 4 },
+    { "title": "Setup PX4 SITL + Gazebo", "milestone": 4 },
+    { "title": "Run PX4 offboard control example", "milestone": 4 },
+    { "title": "Implement trajectory control demo", "milestone": 4 },
+    { "title": "Integrate Jetson camera with ROS2", "milestone": 4 },
+    { "title": "Object tracking with OpenCV + ROS2", "milestone": 4 }
+  ]
+}
