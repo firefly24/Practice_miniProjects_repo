@@ -31,7 +31,7 @@ private:
     ThreadPool_Q(ThreadPool_Q&&) = delete;
     ThreadPool_Q& operator=(ThreadPool_Q&&) = delete;
 
-        // Worker thread function to pop tasks from the queue and execute them
+    // Worker thread function to pop tasks from the queue and execute them
     void startWorkerThread()
     {
         T task;
@@ -69,20 +69,28 @@ public:
         stop_pool = false;
         // Initialize worker threads
         for(int i=0;i<maxWorkers;i++)
-            worker_threads.emplace_back([this]{startWorkerThread();});
+            worker_threads.emplace_back([this]{startWorkerThread();}); // lamba fn to pop a task from queue to execute
     }
 
     // Push a task into the queue
-    void pushTask(T task)
+    //void pushTask(T task)
+    template<typename Func, typename... Args>
+    void pushTask(Func&& func,Args&&... args)
     {
         std::unique_lock<std::mutex> mLock(mtx);
+
+        // We need to encapsulate the function such that calling func() will be equivalent to calling func(args...)
+        // To do this, we can bind the args.. to func object by: auto task =  std::bind(func,args...);
+        // But, we need to preserve the lvalue/rvalue typeof arguments, so we need to use perfect forwarding
+        auto task = std::bind(std::forward<Func>(func),std::forward<Args>(args)...);
+
         // Wait until there is space in the queue
         cond_.wait(mLock, [this]() {return (taskList.size() < capacity) || stop_pool ;} );
 
         // If pool is stopped, do no not push any tasks to the queue
         if (stop_pool) 
             return;
-        taskList.push(task);
+        taskList.push([task](){task();});
         mLock.unlock();
         cond_.notify_one();
     }
