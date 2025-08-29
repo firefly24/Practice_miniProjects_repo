@@ -21,7 +21,7 @@ private:
     std::mutex mtx;
     std::condition_variable cond_;
     std::vector<std::thread> worker_threads;
-    unsigned int completed_tasks;
+    std::atomic<unsigned int> completed_tasks;
     bool stop_pool;
 
     // Disable copying
@@ -33,7 +33,7 @@ private:
     ThreadPool_Q& operator=(ThreadPool_Q&&) = delete;
 
     // Worker thread function to pop tasks from the queue and execute them
-    void startWorkerThread()
+    void startWorkerThread() noexcept
     {
         T task;
         // keep polling for new tasks on this thread
@@ -47,17 +47,20 @@ private:
             if (stop_pool && taskList.empty())
                 return;
 
-            // TODO : Pop a task from the queue to attach to current worker thread
+            // Pop a task from the queue to attach to current worker thread
             task = std::move (taskList.front());
             taskList.pop();
             mLock.unlock();
-            // TODO : Execute the task 
-            task();
+            //Execute the task 
+            try{
+                task();
+            }
+            catch(...)
+            {
+                std::cerr<< "Task thown exception" << std::endl;
+            }
             // Notify that a task has been completed
-            lock_guard<mutex>  lock(cout_mtx);
             completed_tasks++;
-            cout << "Worker thread: " << std::this_thread::get_id() << " completed task:"<< completed_tasks << endl;
-
         }
     }
 
@@ -73,13 +76,16 @@ public:
             worker_threads.emplace_back([this]{startWorkerThread();}); // lamba fn to pop a task from queue to execute
     }
 
-    // Push a task into the queue
-    //void pushTask(T task)
-    template<typename Func, typename... Args>
-    auto pushTask(Func&& func,Args&&... args)
+    int completedTaskCount()
     {
-        std::unique_lock<std::mutex> mLock(mtx);
+        return completed_tasks.load();
+    }
 
+    // Push a task into the queue, and return a future object which other programs can use to fetch results of the task
+    //need to declare the return type as std::future explicitly, as auto is deducing it as "void"
+    template<typename Func, typename... Args>
+    auto pushTask(Func&& func,Args&&... args) -> std::future<decltype(func(args...))>
+    {
         // We need to encapsulate the function such that calling func() will be equivalent to calling func(args...)
         // To do this, we can bind the args.. to func object by: auto task =  std::bind(func,args...);
         // But, we need to preserve the lvalue/rvalue typeof arguments, so we need to use perfect forwarding
@@ -97,15 +103,19 @@ public:
 
         // OR We can use this to construct packaged task in-place
         auto task = std::bind(std::forward<Func>(func),std::forward<Args>(args)...);
-        auto survivorPtr_pkTask = std::make_shared<std::packaged_task<return_type()>>(task);
+        auto survivorPtr_pkTask = std::make_shared<std::packaged_task<return_type()>>(std::move(task));
 
         std::future<return_type> result = survivorPtr_pkTask->get_future();
+
+        std::unique_lock<std::mutex> mLock(mtx);
         // Wait until there is space in the queue
-        cond_.wait(mLock, [this]() {return (taskList.size() < capacity) || stop_pool ;} );
+        if (!cond_.wait_for(mLock,std::chrono::seconds(20), [this]() {return (taskList.size() < capacity) || stop_pool ;} ))
+            throw std::runtime_error("Timeout! Queue is full.");
 
         // If pool is stopped, do no not push any tasks to the queue
+        // TODO: implement stop condition
         if (stop_pool) 
-            return;
+            throw std::runtime_error("Cannot enqueue new tasks as thread pool is stopped");
         taskList.emplace([survivorPtr_pkTask](){(*survivorPtr_pkTask)();});
         mLock.unlock();
         cond_.notify_one();
