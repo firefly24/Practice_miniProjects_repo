@@ -5,6 +5,7 @@
 #include <functional>
 #include <iostream>
 #include <vector>
+#include <future>
 
 using namespace std;
 
@@ -75,24 +76,40 @@ public:
     // Push a task into the queue
     //void pushTask(T task)
     template<typename Func, typename... Args>
-    void pushTask(Func&& func,Args&&... args)
+    auto pushTask(Func&& func,Args&&... args)
     {
         std::unique_lock<std::mutex> mLock(mtx);
 
         // We need to encapsulate the function such that calling func() will be equivalent to calling func(args...)
         // To do this, we can bind the args.. to func object by: auto task =  std::bind(func,args...);
         // But, we need to preserve the lvalue/rvalue typeof arguments, so we need to use perfect forwarding
-        auto task = std::bind(std::forward<Func>(func),std::forward<Args>(args)...);
+        //auto task = std::bind(std::forward<Func>(func),std::forward<Args>(args)...);
 
+        
+        //Since we want the threadpool to run any function with any return type, the decltype() will deduce the return type
+        using return_type = decltype(func(args...));
+        // to add support for tasks to return a value, use packaged_task to get the std::future object
+        //std::packaged_task<return_type()> pkg_task(std::bind(std::forward<Func>(func),std::forward<Args>(args)...));
+
+        //since the packaged_task is non-copyable, we cannot pass it as parameter, so we use std::move
+        // We want the packaged_task object to persist in the queue even this function ends, so we encapsulate it with smart_ptr
+        //auto encapsulated_pkTask = std::make_shared<std::packaged_task<return_type()>>(std::move(pkg_task));
+
+        // OR We can use this to construct packaged task in-place
+        auto task = std::bind(std::forward<Func>(func),std::forward<Args>(args)...);
+        auto survivorPtr_pkTask = std::make_shared<std::packaged_task<return_type()>>(task);
+
+        std::future<return_type> result = survivorPtr_pkTask->get_future();
         // Wait until there is space in the queue
         cond_.wait(mLock, [this]() {return (taskList.size() < capacity) || stop_pool ;} );
 
         // If pool is stopped, do no not push any tasks to the queue
         if (stop_pool) 
             return;
-        taskList.push([task](){task();});
+        taskList.emplace([survivorPtr_pkTask](){(*survivorPtr_pkTask)();});
         mLock.unlock();
         cond_.notify_one();
+        return result;
     }
 
     void stopPool(){
