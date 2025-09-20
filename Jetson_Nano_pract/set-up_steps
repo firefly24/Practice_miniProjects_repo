@@ -1,0 +1,23 @@
+Documenting the Jetson Orin Nano set-up steps, in case needed in future
+
+HW required: 
+1. Jetson Orin Nano Development Board (+ power adapter)
+2. HDMI/DP monitor + DP dongle/cable 
+3. USB wired/wireless keyboard and mouse
+4. microSD card 256GB for first boot
+5. microSD card reader for flashing jetpack image onto the microSD card
+6. Wifi and Bluetooth USB adapter for connectivity on jetson Board
+7. (Optional for better performance) NVMe SSD 1TB PCIe card for better memory access - use PCIe Gen3
+
+
+Setup Steps followed: 
+
+1. Followed the NVDIA official guide for first boot with JetPack 6.2 through microSD card:
+    https://www.jetson-ai-lab.com/initial_setup_jon.html
+    https://developer.nvidia.com/embedded/learn/get-started-jetson-nano-devkit
+
+2. Using Wifi adapter for internet connectivity, I downloaded chromium browser and miniconda3 for jetson nano , as Anaconda is not compatible with ARM64 platforms.
+
+3. Migrate from microSD to boot from SSD for faster performance, using below guides from JetsonHacks:
+Scripts by JetsonHacks: https://github.com/jetsonhacks/migrate-jetson-to-ssd
+Youtube tutorial : https://www.youtube.com/watch?v=497u-CcYvE8&t=269s
