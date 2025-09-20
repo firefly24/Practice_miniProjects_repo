@@ -1,5 +1,0 @@
----
-triple:          'x86_64-apple-darwin'
-binary-path:     lock_free_queue.exe
-relocations:     []
-...
