@@ -37,15 +37,21 @@
 #include <vector>
 #include <iostream>
 
+struct alignas(64) padded_cacheline_var{
+    std::atomic<size_t> index;
+    padded_cacheline_var(size_t idx): index(idx){}    
+}typedef PaddedAtomicIdx;
+
 template <typename T>
 class lockFree_spsc_Queue
 {
 private:
+    //alignas(64) std::atomic<size_t> head; // Index of first item
+    //alignas(64) std::atomic<size_t> tail; // Index of the next empty slot after last item
+    PaddedAtomicIdx head; // Index of first item
+    PaddedAtomicIdx tail; // Index of the next empty slot after last item
     size_t capacity_;
     std::vector<T> ring_buff;
-    std::atomic<size_t> head; // Index of first item
-    std::atomic<size_t> tail; // Index of the next empty slot after last item
-
 
     // This function helps to increment the head/tail index such that it wraps around the ring buffer
     size_t advance(size_t index) const
@@ -55,7 +61,7 @@ private:
 
 public:
 
-    explicit lockFree_spsc_Queue (size_t Capacity): capacity_(Capacity+1), head(0), tail(0)
+    explicit lockFree_spsc_Queue (size_t Capacity): head(0), tail(0),capacity_(Capacity+1)
     {
         //capacity = Capacity;
         ring_buff = std::vector<T>(capacity_); // keep one empty element between head and tail to check if buffer full/empty
@@ -73,13 +79,15 @@ public:
         // Only producer thread exclusively modifies the tail of the buffer, whereas consumer thread has no reason to modify tail.
         // So we can load tail idx in relaxed order in producer thread
 
-        size_t back = tail.load(std::memory_order_relaxed);
+        size_t back = tail.index.load(std::memory_order_relaxed);
+        //size_t back = tail.index.load(std::memory_order_seq_cst);
         size_t next;
 
         // Check if queue is full
         // Since head can be modified by consumer thread, we would want the consumer to finish updating the head before publishing it to producer(this) 
         // So we will use acquire ordering for head to ensure getting an up-to-date head 
-        if ((next = advance(back)) == head.load(std::memory_order_acquire))
+        if ((next = advance(back)) == head.index.load(std::memory_order_acquire))
+        //if ((next = advance(back)) == head.index.load(std::memory_order_seq_cst))
         {
 #ifdef DEBUG
             std::cout << "Queue is full" << std::endl;
@@ -89,7 +97,8 @@ public:
         ring_buff[back] = item;
         // Producer(this) thread need to publish the incremented tail, only after the item is inserted to the queue,
         // so ordering is important here, and so we use release ordering to publish new tail only after above op is done
-        tail.store(next,std::memory_order_release);  
+        tail.index.store(next,std::memory_order_release);  
+        //tail.index.store(next,std::memory_order_seq_cst);  
         return true;
     }
 
@@ -99,13 +108,13 @@ public:
         // Only producer thread exclusively modifies the tail of the buffer, whereas consumer thread has no reason to modify tail.
         // So we can load tail idx in relaxed order in producer thread
 
-        size_t back = tail.load(std::memory_order_relaxed);
+        size_t back = tail.index.load(std::memory_order_relaxed);
         size_t next;
 
         // Check if queue is full
         // Since head can be modified by consumer thread, we would want the consumer to finish updating the head before publishing it to producer(this) 
         // So we will use acquire ordering for head to ensure getting an up-to-date head 
-        if ((next = advance(back)) == head.load(std::memory_order_acquire))
+        if ((next = advance(back)) == head.index.load(std::memory_order_acquire))
         {
 #ifdef DEBUG
             std::cout << "Queue is full" << std::endl;
@@ -115,31 +124,34 @@ public:
         ring_buff[back] = std::move(item);
         // Producer(this) thread need to publish the incremented tail, only after the item is inserted to the queue,
         // so ordering is important here, and so we use release ordering to publish new tail only after above op is done
-        tail.store(next,std::memory_order_release);  
+        tail.index.store(next,std::memory_order_release);  
         return true;
     }
 
     // Remove/consume item by consumer thread from the front of the queue
-    //TODO : fix return value on empty queue
     bool pop(T &out)
     {
         // Consumer thread will only consume from the head of the queue, so it will advance only head idx and not modify tail idx
-        size_t front = head.load(std::memory_order_relaxed);
+        size_t front = head.index.load(std::memory_order_relaxed);
+        //size_t front = head.index.load(std::memory_order_seq_cst);
 
         // Check if queue is empty
         //we want to access the tail under the condition that the producer is done pushing new element and incrementing the tail
         // so we need to impose an order here as well, that consumer views the updated tail published by consumer
-        if (front == tail.load(std::memory_order_acquire))
+        if (front == tail.index.load(std::memory_order_acquire))
+        //if (front == tail.index.load(std::memory_order_seq_cst))
         {
 #ifdef DEBUG
             std::cout << "Queue is empty" << std::endl;
 #endif
             return false;
         }
+        //out = ring_buff[front];
         // works for both copyable and non-copyable, as direct assignment failed for when T = unqiue_ptr 
         out = std::move(ring_buff[front]);
-        //out = ring_buff[front];
-        head.store(advance(front), std::memory_order_release);
+
+        head.index.store(advance(front), std::memory_order_release);
+        //head.index.store(advance(front), std::memory_order_seq_cst);
         // published the updated head after consuming front element
         return true;
     }
@@ -151,7 +163,7 @@ public:
 
     size_t size() const
     {
-        return((capacity_+tail.load(std::memory_order_relaxed)) - head.load(std::memory_order_relaxed) )%capacity_;
+        return((capacity_+tail.index.load(std::memory_order_relaxed)) - head.index.load(std::memory_order_relaxed) )%capacity_;
     }
 
     /*

@@ -1,0 +1,15 @@
+
+Baseline performance of my SPSC queue, without any padding/improvements:
+Elements:10000000
+Time taken: 179ms
+Throughput: 5.58659e+07 
+
+By Using cache-line padding for head and tail to avoid false sharing:
+Elements:10000000
+Time taken: 141ms
+Throughput: 7.0922e+07
+
+By using strict sequential ordering for head and tail atomics in push and pop operations:
+Elements:10000000
+Time taken: 627ms
+Throughput: 1.5949e+07
