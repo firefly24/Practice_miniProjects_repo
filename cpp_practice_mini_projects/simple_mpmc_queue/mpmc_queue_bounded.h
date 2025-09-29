@@ -240,7 +240,7 @@ public:
     ~mpmcQueueBounded()
     {
         // We assume it is the producer and consumer responsibility to stop advancing head and tail before destructor is called
-        for(int slot=0;slot<capacity_;slot++)
+        for(size_t slot=0;slot<capacity_;slot++)
         {
             if(hasActiveData(buffer_[slot].seq.load(std::memory_order_relaxed), slot)) 
                 std::launder(reinterpret_cast<T*>(&buffer_[slot].mem))->~T();
