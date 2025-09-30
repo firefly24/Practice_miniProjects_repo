@@ -107,7 +107,6 @@ public:
                     // Now fill the data into the reserved slot 
                     T *data = std::launder(reinterpret_cast<T*>(&(buffer_[slot_idx].mem)));
                     new (data) T(item); // This will probably invoke move constructor of T, which is noexcept
-
                      // only after item is constructed in-memory , should we publish the new seq no, so release ordering required;
                     buffer_[slot_idx].seq.store(tail+1,std::memory_order_release);
                     return true;
@@ -143,7 +142,6 @@ public:
                 {
                     T *data = std::launder(reinterpret_cast<T*>(&(buffer_[slot_idx].mem)));
                     new (data) T(std::move(item)); // This will probably invoke move constructor of T
-
                      // only after item is constructed in-memory , should we publish the new seq no, so release ordering required;
                     buffer_[slot_idx].seq.store(tail+1,std::memory_order_release);
                     return true;
@@ -179,7 +177,6 @@ public:
                 {
                     T *data = std::launder(reinterpret_cast<T*>(&(buffer_[slot_idx].mem)));
                     new (data) T(std::forward<Args>(args)...); // This will probably invoke move constructor of T
-
                      // only after item is constructed in-memory , should we publish the new seq no, so release ordering required;
                     buffer_[slot_idx].seq.store(tail+1,std::memory_order_release);
                     return true;
@@ -225,7 +222,9 @@ public:
                 continue;
             }
             if (idx <=head)
+            {
                 return false;   // We must first check if the slot is free, if buffer slot is not free, doesn't make sense to CAS the head
+            }
             
             count++;
             if (count > 16)
@@ -235,7 +234,6 @@ public:
             }   
         }
     }
-
     //destructor
     ~mpmcQueueBounded()
     {
