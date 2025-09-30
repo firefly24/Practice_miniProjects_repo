@@ -4,6 +4,7 @@
 #include <semaphore>
 #include <string>
 #include <memory>
+#include <iostream>
 #include "../simple_mpmc_queue/mpmc_queue_bounded.h"
 
 template <typename Task> class Actor;
@@ -26,22 +27,36 @@ private:
         std::function<void()> newTask;
         if(mailbox_q->try_pop(newTask))
         {
-#ifdef DEBUG 
-            std::cout << name_ << ": "; 
-#endif
+            //std::cout << name_ << ": "; 
             newTask();
         }
     }
+
+    // Once actor is stopped, flushes out mailbox
+    void drainMailbox()
+    {
+        // Flush out all tasks remaining in the queue by executing them
+        std::function<void()> remainingTask;
+        while(mailbox_q->try_pop(remainingTask))
+        {
+            std::function<void()> remainingTask;
+            //std::cout << name_ << ": "; 
+            remainingTask();
+        }
+    }
+
     // Keep polling mailbox for new tasks
     void checkMailbox()
     {
         // TODO : if actor_alive_ is false, but the mailbox still has some tasks pending, 
         //need to add mechanims to complete those tasks
-        while(actor_alive_.load(std::memory_order_relaxed))
+        while(actor_alive_.load(std::memory_order_acquire))
         {
             new_mail_arrived_.acquire();
             receive();
         }
+
+        drainMailbox();
         std::cout <<name_ <<": Stopping dispatcher thread" <<std::endl;
     }
 
@@ -66,13 +81,14 @@ public:
     // Push a task to this actor's mailbox
     void addToMailbox(Task task)
     {
-        if (actor_alive_.load(std::memory_order_relaxed))
-        {
-            while (!mailbox_q->try_push(task)){
-                // TODO: add some terminate logic here to prevent spinning forever
-            }   
-            new_mail_arrived_.release();
-        }
+        // TODO: once actor is stopped, but some thread keeps pushing successfully back to back, we won't enter while loop
+        if (!actor_alive_.load(std::memory_order_acquire))
+            return;
+        while (!mailbox_q->try_push(task)){
+                if (!actor_alive_.load(std::memory_order_acquire))
+                    return; // TODO: add some terminate logic here to prevent spinning forever
+        }   
+        new_mail_arrived_.release();
     }
 
     // Stop the mailbox checker thread
@@ -87,17 +103,17 @@ public:
     ~Actor()
     {
         std::cout << name_ << ": Destrutor Called" << std::endl;
-        if (actor_alive_)
+        if (actor_alive_.load())
             stopActor();
     }
 
     //delete copy constructors
     Actor(const Actor&) = delete;
-    Actor operator=(const Actor&) = delete;
+    Actor& operator=(const Actor&) = delete;
 
     //set move constuctors to default;
-    Actor(Actor&&) = default;
-    Actor& operator=(Actor &&) = default;
+    Actor(Actor&&) = delete;
+    Actor& operator=(Actor &&) = delete;
 
 };
 
@@ -120,7 +136,7 @@ public:
 
     std::vector<std::shared_ptr<Actor<Task>>> actor_pool_;
     ActorSystem(size_t numActors):   active_actors_(0), total_actors_(numActors) {
-        actor_pool_=std::vector<std::shared_ptr<Actor<Task>>>(numActors,nullptr) ;
+        actor_pool_=std::vector<std::shared_ptr<Actor<Task>>>(numActors) ;
     }
 
     std::shared_ptr<Actor<Task>> spawn(size_t mailbox_capacity=1,std::string name = "")
@@ -130,7 +146,7 @@ public:
         {
             curr_size = active_actors_.load(std::memory_order_relaxed);
             if (curr_size >= total_actors_)
-                return nullptr;
+                return {};
             if (active_actors_.compare_exchange_weak(curr_size,curr_size+1, std::memory_order_release,std::memory_order_acquire))
             {
                 actor_pool_[curr_size] = std::make_shared<Actor<Task>>(mailbox_capacity,curr_size,name);
