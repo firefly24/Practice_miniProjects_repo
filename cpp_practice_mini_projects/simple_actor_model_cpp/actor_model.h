@@ -39,7 +39,6 @@ private:
         std::function<void()> remainingTask;
         while(mailbox_q->try_pop(remainingTask))
         {
-            std::function<void()> remainingTask;
             //std::cout << name_ << ": "; 
             remainingTask();
         }
@@ -79,16 +78,17 @@ public:
     }
 
     // Push a task to this actor's mailbox
-    void addToMailbox(Task task)
+    bool addToMailbox(Task task)
     {
-        // TODO: once actor is stopped, but some thread keeps pushing successfully back to back, we won't enter while loop
+        //once actor is stopped, but some thread keeps pushing successfully back to back, we won't enter while loop
         if (!actor_alive_.load(std::memory_order_acquire))
-            return;
+            return false;
         while (!mailbox_q->try_push(task)){
                 if (!actor_alive_.load(std::memory_order_acquire))
-                    return; // TODO: add some terminate logic here to prevent spinning forever
+                    return false; //add some terminate logic here to prevent spinning forever
         }   
         new_mail_arrived_.release();
+        return true;
     }
 
     // Stop the mailbox checker thread
@@ -122,7 +122,9 @@ template <typename Task, typename Func, typename... Args>
 void send(Actor<Task>& actor,Func&& func, Args&&... args)
 {
     Task task = std::bind(std::forward<Func>(func), std::forward<Args>(args)...);
-    actor.addToMailbox(task);
+    if (!actor.addToMailbox(task))
+        std::cout << "Actor is stopped! Mailbox is closed for new mails!" << std::endl;
+    return;
 }
 
 template <typename Task>
@@ -142,6 +144,7 @@ public:
     std::shared_ptr<Actor<Task>> spawn(size_t mailbox_capacity=1,std::string name = "")
     {
         size_t curr_size;
+        size_t retry_count=0;
         while(1)
         {
             curr_size = active_actors_.load(std::memory_order_relaxed);
@@ -152,6 +155,9 @@ public:
                 actor_pool_[curr_size] = std::make_shared<Actor<Task>>(mailbox_capacity,curr_size,name);
                 return actor_pool_[curr_size];
             }
+            retry_count++;
+            if (retry_count>=16)
+                return {};
             // TODO: Do I need backoff strategy here ? 
         }
     }

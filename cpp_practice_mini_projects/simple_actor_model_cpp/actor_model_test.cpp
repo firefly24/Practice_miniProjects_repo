@@ -34,6 +34,11 @@ void testActorSystem()
     auto start = std::chrono::high_resolution_clock::now();
 
     std::shared_ptr<Actor<Job>> asActor = ActorAdmin.spawn(10,"Actor1");
+    if (!asActor)
+    {
+        std::cout << "Failed to create actor" << std::endl;
+        return;
+    }
 
     for (int i=1;i<=total_msgs;i++)
     {
