@@ -90,7 +90,7 @@ public:
     mpmcQueueBounded operator=(const mpmcQueueBounded&) = delete;
 
     // for copy item type
-    bool try_push(T item)
+    bool try_push(const T& item)
     {
         int count = 0;
         while(1)
@@ -106,7 +106,7 @@ public:
                     // Since tail increment is success, means we have successfully reserved a slot
                     // Now fill the data into the reserved slot 
                     T *data = std::launder(reinterpret_cast<T*>(&(buffer_[slot_idx].mem)));
-                    new (data) T(item); // This will probably invoke move constructor of T, which is noexcept
+                    new (data) T(item); // This will probably invoke copy constructor of T, which is noexcept
                      // only after item is constructed in-memory , should we publish the new seq no, so release ordering required;
                     buffer_[slot_idx].seq.store(tail+1,std::memory_order_release);
                     return true;
