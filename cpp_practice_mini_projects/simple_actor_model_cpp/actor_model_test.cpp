@@ -5,30 +5,29 @@
 
 using Job = std::function<void()> ;
 
-/*
 void pingpong(std::shared_ptr<Actor<Job>> sender, std::shared_ptr<Actor<Job>> receiver)
 {
     std::cout << "Ping" << std::endl;
 
-    auto getack = [](){std::cout << "Pong" << std::endl; };
-
-    send(sender,getack);
+    Job getack = [](){std::cout << "Pong" << std::endl; };
+    receiver->send(sender,std::move(getack));
 }
 
 void testPingpong()
 {
-    std::shared_ptr<Actor<Job>> dummy = std::make_shared<Actor<Job>> (5,1,"dummy1");
+    ActorSystem<Job> ActorAdmin(2);
 
-    std::shared_ptr<Actor<Job>> dummy2 = std::make_shared<Actor<Job>>(5,2,"dummy2");
+    std::shared_ptr<Actor<Job>> pinger = ActorAdmin.spawn(3,"Pinger");
+    std::shared_ptr<Actor<Job>> responder = ActorAdmin.spawn(3,"Responder");
 
-    send(dummy2,pingpong,dummy,dummy2);
+    //for(int i=0;i<10;i++)
+        ActorAdmin.send("Pinger","Responder",constructTask<Job>(pingpong,pinger,responder));
 
-    dummy->sendMsg(dummy2,constructTask<Job>(pingpong));
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    //pinger->sendMsg(responder,constructTask<Job>(pingpong,pinger,responder));
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
     return;
 }
-*/
 
 void testActorSystem()
 {
@@ -42,8 +41,6 @@ void testActorSystem()
                                                     myFunc(i);
                                             };
 
-    //repeated_task(myFunc,5);
-
     auto start = std::chrono::high_resolution_clock::now();
 
     std::shared_ptr<Actor<Job>> asLeader = ActorAdmin.spawn(10,"Leader");
@@ -55,8 +52,10 @@ void testActorSystem()
     }
     bool done = false;
     //done = asLeader->sendMsg(asActor,constructTask<Job>(myFunc,20));
-    for(int i=0;i<20;i++)
-        done = asLeader->sendMsg(asActor,constructTask<Job>(repeated_task,myFunc,10));
+    //for(int i=0;i<20;i++)
+    //    done = asLeader->send(asActor,constructTask<Job>(repeated_task,myFunc,10));
+
+    ActorAdmin.send("Leader","Actor1",constructTask<Job>(repeated_task,myFunc,10));
 
     if (done)
     {
@@ -67,12 +66,12 @@ void testActorSystem()
         std::cout << "Elements:" << total_msgs << "\nTime taken: " << time_taken << "ms\nThroughput: " << throughput << std::endl;
 
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 }
 
 int main()
 {
-    //testPingpong();
+    testPingpong();
     testActorSystem();
     return 0;
 }
