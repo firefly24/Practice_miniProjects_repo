@@ -18,10 +18,17 @@ struct Message{
     std::weak_ptr<Actor<Task>> sender;
     std::weak_ptr<Actor<Task>> receiver;
     Message(){}
-    Message(Task t):task(t), sender{}, receiver{} {}
+    //Message(Task&& t):task(std::move(t)), sender{}, receiver{} {}
 
-    Message(Task t, std::weak_ptr<Actor<Task>> sender_m, std::weak_ptr<Actor<Task>> receiver_m) 
-            :task(t), sender(sender_m), receiver(receiver_m) {}
+    explicit Message(Task&& t, std::weak_ptr<Actor<Task>> sender_m, std::weak_ptr<Actor<Task>> receiver_m) 
+            :task(std::move(t)), sender(sender_m), receiver(receiver_m) {}
+
+    Message(const Message&) = delete;
+    Message operator=(const Message&) = delete;
+
+    Message(Message&&) = default;
+    Message& operator=(Message&&) = default;
+    
 };
 
 template <typename Task>
@@ -39,7 +46,7 @@ private:
         Message<Task> msg;
         if(mailbox_q->try_pop(msg))
         {
-            std::cout << name_ << ": "; 
+            //std::cout << name_ << ": "; 
             msg.task();
         }
     }
@@ -51,7 +58,7 @@ private:
         Message<Task> remainingMsg;
         while(mailbox_q->try_pop(remainingMsg))
         {
-            std::cout << name_ << ": "; 
+            //std::cout << name_ << ": "; 
             remainingMsg.task();
         }
     }
@@ -94,14 +101,14 @@ public:
     }
 
     // Push a task to this actor's mailbox
-    bool addToMailbox(Message<Task> msg)
+    bool addToMailbox(Message<Task>&& msg)
     {
         //once actor is stopped, but some thread keeps pushing successfully back to back, we won't enter while loop
         if (!actor_alive_.load(std::memory_order_acquire))
             return false;
 
         size_t retry_count=0;
-        while (!mailbox_q->try_push(msg))
+        while (!mailbox_q->try_push(std::move(msg)))
         {
             if (!actor_alive_.load(std::memory_order_acquire))
                 return false; 
@@ -115,13 +122,13 @@ public:
     }
 
 
-    bool sendMsg(std::shared_ptr<Actor<Task>> receiver,Task task)
+    bool sendMsg(std::shared_ptr<Actor<Task>> receiver,Task&& task)
     {
         if(!actor_alive_.load(std::memory_order_relaxed))
             return false;
         //Message<Task> newMsg{this,receiver,task};
         if (receiver)
-            return receiver->addToMailbox(Message<Task>{task,std::weak_ptr<Actor<Task>>(this->shared_from_this()),std::weak_ptr<Actor<Task>>(receiver)});
+            return receiver->addToMailbox(Message<Task>{std::move(task),std::weak_ptr<Actor<Task>>(this->shared_from_this()),std::weak_ptr<Actor<Task>>(receiver)});
         return false;
     }
 
@@ -154,12 +161,12 @@ public:
 
 // Function that constucts the task from given parameters and adds it to the actor's mailbox
 template <typename Task, typename Func, typename... Args>
-void send(std::shared_ptr<Actor<Task>> receiver,Func&& func, Args&&... args)
+void send(std::shared_ptr<Actor<Task>> sender,std::shared_ptr<Actor<Task>> receiver,Func&& func, Args&&... args)
 {
     Task task = std::bind(std::forward<Func>(func), std::forward<Args>(args)...);
-    Message<Task> new_msg{task,std::weak_ptr<Actor<Task>>{},std::weak_ptr<Actor<Task>>(receiver)};
+    //Message<Task> new_msg{task,std::weak_ptr<Actor<Task>>{},std::weak_ptr<Actor<Task>>(receiver)};
     
-    if (!receiver->addToMailbox(new_msg))
+    if (!receiver->addToMailbox(Message<Task>(std::move(task),std::weak_ptr<Actor<Task>>(sender),std::weak_ptr<Actor<Task>>(receiver))))
         std::cout << "Actor is stopped! Mailbox is closed for new mails!" << std::endl;
     return;
 }
