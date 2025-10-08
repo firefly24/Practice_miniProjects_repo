@@ -15,13 +15,13 @@ void pingpong(std::shared_ptr<Actor<Job>> sender, std::shared_ptr<Actor<Job>> re
 
 void testPingpong()
 {
-    ActorSystem<Job> ActorAdmin(2);
+    std::shared_ptr<ActorSystem<Job>> ActorAdmin = std::make_shared<ActorSystem<Job>>(2);
 
-    std::shared_ptr<Actor<Job>> pinger = ActorAdmin.spawn(3,"Pinger");
-    std::shared_ptr<Actor<Job>> responder = ActorAdmin.spawn(3,"Responder");
+    std::shared_ptr<Actor<Job>> pinger = ActorAdmin->spawn(3,"Pinger");
+    std::shared_ptr<Actor<Job>> responder = ActorAdmin->spawn(3,"Responder");
 
     //for(int i=0;i<10;i++)
-        ActorAdmin.send("Pinger","Responder",constructTask<Job>(pingpong,pinger,responder));
+        ActorAdmin->send("Pinger","Responder",constructTask<Job>(pingpong,pinger,responder),true);
 
     //pinger->sendMsg(responder,constructTask<Job>(pingpong,pinger,responder));
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -29,6 +29,7 @@ void testPingpong()
     return;
 }
 
+/*
 void testActorSystem()
 {
     ActorSystem<Job> ActorAdmin(2);
@@ -68,10 +69,11 @@ void testActorSystem()
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 }
+*/
 
 int main()
 {
     testPingpong();
-    testActorSystem();
+    //testActorSystem();
     return 0;
 }

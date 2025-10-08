@@ -19,17 +19,19 @@ struct Message{
     Task task;
     std::weak_ptr<Actor<Task>> sender;
     std::string sender_handle;
+    bool request_reply;
     std::chrono::time_point<std::chrono::steady_clock> timestamp;
 
     Message(){}
-    explicit Message(Task&& t, std::shared_ptr<Actor<Task>> sender_m) 
-        :task(std::move(t)), sender(std::weak_ptr<Actor<Task>>(sender_m))
+    explicit Message(Task&& t, std::shared_ptr<Actor<Task>> sender_m, bool needs_ack = false) 
+        :task(std::move(t)), sender(std::weak_ptr<Actor<Task>>(sender_m)), request_reply(needs_ack)
     {
         if(sender_m)
             sender_handle = sender_m->name_;
         else
             sender_handle="ADMIN";
         timestamp = std::chrono::steady_clock::now();
+        //request_reply = false;
     }
 
     // Delete copy constructor for msg to make it move only type
@@ -49,6 +51,7 @@ private:
     std::atomic<bool> actor_alive_; // flag to track if actor is alive to receive msgs
     std::thread dispatcher_;    // dispatcher thead that keeps checking mailbox for new tasks to execute
     std::counting_semaphore<> new_mail_arrived_{0}; // use counting semaphore to keep track of tasks in the maibox waiting to be picked
+    std::weak_ptr<ActorSystem<Task>> owning_system_;
 
     // Open a msg from mailbox and execute the task
     void receive()
@@ -58,7 +61,20 @@ private:
         {
             std::cout << name_ << ": "; 
             msg.task();
+            if (msg.request_reply)
+            {
+                // Since our task returns void, sending success  only means task is successfully enqueued at receiver end
+                handleReply(msg);
+            }
         }
+    }
+
+    // Invoke if sender requests a reply, so send a successful acknowledgement to sender mailbox
+    void handleReply(const Message<Task>& msg)
+    {
+        auto sender = msg.sender.lock();
+        if(sender)
+            send(sender,[this](){std::cout << "Message handled successfully by Actor: "<<this->name_ << std::endl;});
     }
 
     // Once actor is stopped, flushes out mailbox
@@ -91,8 +107,6 @@ public:
     size_t id_; // Keeping a actor id to identify an actor, will decide in future how to use this
     std::string name_; //Have an actor name, to get pretty logs!
 
-    friend bool ActorSystem<Task>::send(std::string,std::string,Task && task);
-
     Actor(size_t mailbox_size, size_t id):actor_alive_(true),id_(id)
     {
         name_ ="";
@@ -100,12 +114,18 @@ public:
         dispatcher_ = std::thread([this](){checkMailbox();});
     }
 
-    Actor(size_t mailbox_size, size_t id,std::string name):actor_alive_(true),id_(id),name_(name)
+    Actor(size_t mailbox_size, size_t id,std::string name)
+        :actor_alive_(true),id_(id),name_(name)
     {
         mailbox_q = std::make_unique<mpmcQueueBounded<Message<Task>>>(mailbox_size);
         dispatcher_ = std::thread([this](){checkMailbox();});
     }
 
+    void setActorSystem(std::shared_ptr<ActorSystem<Task>> actor_system)
+    {
+        owning_system_ = std::weak_ptr<ActorSystem<Task>>(actor_system);
+    }
+    
     // API to check if actor is active or stopped
     bool isAlive()
     {
@@ -135,30 +155,36 @@ public:
     }
 
 
-    bool send(std::shared_ptr<Actor<Task>> receiver,Task&& task)
+    bool send(std::shared_ptr<Actor<Task>> receiver,Task&& task,bool needs_ack = false)
     {
-        if(!actor_alive_.load(std::memory_order_relaxed))
+        if(!actor_alive_.load(std::memory_order_acquire))
             return false;
         if (receiver)
-            return receiver->addToMailbox(Message<Task>{std::move(task),this->shared_from_this()});
+            return receiver->addToMailbox(Message<Task>{std::move(task),this->shared_from_this(),needs_ack});
         return false;
     }
 
     // Stop the mailbox checker thread
     void stopActor()
     {
-        actor_alive_.store(false,std::memory_order_release);
-        new_mail_arrived_.release();
-        if(dispatcher_.joinable())
-            dispatcher_.join();
+        //actor_alive_.store(false,std::memory_order_release);
+        if (actor_alive_.exchange(false,std::memory_order_acq_rel))
+        {
+            new_mail_arrived_.release();
+            if(dispatcher_.joinable())
+                dispatcher_.join();
+            
+            std::shared_ptr<ActorSystem<Task>> owning_actor_system = owning_system_.lock();
+            if(owning_actor_system)
+                owning_actor_system->unregisterActor(this->name_);
+        }
     }
 
     // Destructor
     ~Actor()
     {
         std::cout << name_ << ": Destrutor Called" << std::endl;
-        if (actor_alive_.load())
-            stopActor();
+        stopActor();
     }
 
     //delete copy constructors
@@ -179,7 +205,7 @@ Task constructTask(Func&& func, Args&&... args)
 }
 
 template <typename Task>
-class ActorSystem
+class ActorSystem : public std::enable_shared_from_this<ActorSystem<Task>>
 {
 private:
     std::atomic<size_t> active_actors_;
@@ -197,17 +223,21 @@ public:
 
     bool registerActor(std::shared_ptr<Actor<Task>> actor)
     {
-        if(actor_registry_[actor->name_].lock())
+        // Do not allow actor with no name
+        if (actor->name_ == "")
+            return false;
+
+        std::lock_guard<std::mutex> rlock(registry_lock_);
+        if((actor_registry_.find(actor->name_) != actor_registry_.end()) && actor_registry_[actor->name_].lock())
         {
-            std::cout << "Name is taken" << std::endl;
+            std::cout << "Name: "<<actor->name_<<" is taken" << std::endl;
             return false;
         }
-        std::lock_guard<std::mutex> rlock(registry_lock_);
         actor_registry_[actor->name_] = std::weak_ptr<Actor<Task>>(actor);
         return true;
     }
 
-    std::shared_ptr<Actor<Task>> getActor(std::string actor_name)
+    std::shared_ptr<Actor<Task>> getActor(const std::string& actor_name)
     {
         std::lock_guard<std::mutex> rlock(registry_lock_);
         if(actor_registry_.find(actor_name) == actor_registry_.end())
@@ -218,55 +248,56 @@ public:
     std::shared_ptr<Actor<Task>> spawn(size_t mailbox_capacity=1,std::string name="")
     {
         size_t curr_size;
-        size_t retry_count=0;
-        if (actor_registry_.find(name) != actor_registry_.end())
-        {
-            std::cout << "Actor name already exists!" << std::endl;
-            return {};
-        }
         while(1)
         {
             curr_size = active_actors_.load(std::memory_order_relaxed);
             if (curr_size >= total_actors_)
                 return {};
-            if (active_actors_.compare_exchange_weak(curr_size,curr_size+1, std::memory_order_release,std::memory_order_acquire))
+            if (active_actors_.compare_exchange_strong(curr_size,curr_size+1, std::memory_order_release,std::memory_order_acquire))
             {
-                actor_pool_[curr_size] = std::make_shared<Actor<Task>>(mailbox_capacity,curr_size,name);
-                registerActor(actor_pool_[curr_size]);
-                return actor_pool_[curr_size];
-            }
-            retry_count++;
-            if (retry_count>=16)
+                std::shared_ptr<Actor<Task>> new_actor= std::make_shared<Actor<Task>>(mailbox_capacity,curr_size,name);
+
+                if ( registerActor(new_actor) )
+                {
+                    new_actor->setActorSystem(this->shared_from_this());
+                    actor_pool_[curr_size] = new_actor;
+                    return actor_pool_[curr_size];
+                }
+                // register actor failed, rollback active actors
+                active_actors_.fetch_sub(1,std::memory_order_release);
                 return {};
+            }
+            std::this_thread::yield();
         }
+        return {};
     }
 
     // Helper function to send msg based on actor name instead of pointers, from sender -> receiver actor
-    bool send(std::string sender_handle,std::string receiver_handle, Task&& task)
+    bool send(const std::string& sender_handle,const std::string& receiver_handle, Task&& task, bool needs_ack=false)
     {   
         auto receiver = getActor(receiver_handle);
         auto sender = getActor(sender_handle);
         if (!receiver || !sender)
             return false;        
 
-        return sender->send(receiver,std::move(task));
+        return sender->send(receiver,std::move(task),needs_ack);
     }
 
     // Helper function overload, directly using actor pointers
-    bool send(std::shared_ptr<Actor<Task>> sender,std::shared_ptr<Actor<Task>> receiver,Task&& task)
+    bool send(std::shared_ptr<Actor<Task>> sender,std::shared_ptr<Actor<Task>> receiver,Task&& task,bool needs_ack=false)
     {
         if(!receiver || !sender)
             return false;
-        return sender->send(receiver,std::move(task));
+        return sender->send(receiver,std::move(task),needs_ack);
     }
 
-    bool send(std::string receiver_handle, Task&& task)
+    bool send(const std::string& receiver_handle, Task&& task)
     {   
         auto receiver = getActor(receiver_handle);
         if (!receiver)
             return false;
 
-        if ( !receiver->addToMailbox(Message<Task>{std::move(task),{}}) )
+        if ( !receiver->addToMailbox(Message<Task>{std::move(task),{},false}) )
         {
             std::cout << receiver->name_ <<":Actor is stopped! Mailbox is closed for new mails!" << std::endl;
             return false;
