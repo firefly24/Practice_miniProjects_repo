@@ -29,15 +29,15 @@ struct Message{
         if(sender_m)
             sender_handle = sender_m->name_;
         else
-            sender_handle="ADMIN";
+            sender_handle="ADMIN";      //Assuming msg sent by unknown sender is admin msg by ActorSystem itself
         timestamp = std::chrono::steady_clock::now();
-        //request_reply = false;
     }
 
     // Delete copy constructor for msg to make it move only type
     Message(const Message&) = delete;
     Message& operator=(const Message&) = delete;
 
+    // Default move constructors
     Message(Message&&) = default;
     Message& operator=(Message&&) = default;
     
@@ -60,7 +60,7 @@ private:
         if(mailbox_q->try_pop(msg))
         {
             std::cout << name_ << ": "; 
-            msg.task();
+            msg.task();     // Executes task
             if (msg.request_reply)
             {
                 // Since our task returns void, sending success  only means task is successfully enqueued at receiver end
@@ -81,11 +81,16 @@ private:
     void drainMailbox()
     {
         // Flush out all tasks remaining in the queue by executing them
-        Message<Task> remainingMsg;
-        while(mailbox_q->try_pop(remainingMsg))
+        Message<Task> remaining_msg;
+        while(mailbox_q->try_pop(remaining_msg))
         {
             std::cout << name_ << ": "; 
-            remainingMsg.task();
+            remaining_msg.task();
+            if (remaining_msg.request_reply)
+            {
+                // Since our task returns void, sending success  only means task is successfully enqueued at receiver end
+                handleReply(remaining_msg);
+            }
         }
     }
 
@@ -94,8 +99,8 @@ private:
     {
         while(actor_alive_.load(std::memory_order_acquire))
         {
-            new_mail_arrived_.acquire();
-            receive();
+            new_mail_arrived_.acquire();    // wait for semaphore to be signalled when new mail arrives
+            receive();                      // Pop the msg from mailbox to execute task
         }
 
         // Actor is stopped, execute the remaining process in the mailbox
@@ -111,7 +116,7 @@ public:
     {
         name_ ="";
         mailbox_q = std::make_unique<mpmcQueueBounded<Message<Task>>>(mailbox_size);
-        dispatcher_ = std::thread([this](){checkMailbox();});
+        dispatcher_ = std::thread([this](){checkMailbox();});  //Start check mailbox loop 
     }
 
     Actor(size_t mailbox_size, size_t id,std::string name)
@@ -121,11 +126,13 @@ public:
         dispatcher_ = std::thread([this](){checkMailbox();});
     }
 
+    // We want our actor to keep a reference to the owning actor system that spawned it, 
+    //so that we can use it to communicate important info to the owning system later
     void setActorSystem(std::shared_ptr<ActorSystem<Task>> actor_system)
     {
         owning_system_ = std::weak_ptr<ActorSystem<Task>>(actor_system);
     }
-    
+
     // API to check if actor is active or stopped
     bool isAlive()
     {
@@ -142,7 +149,7 @@ public:
         size_t retry_count=0;
         while (!mailbox_q->try_push(std::move(msg)))
         {
-            if (!actor_alive_.load(std::memory_order_acquire))
+            if (!actor_alive_.load(std::memory_order_acquire))     // Actor is dead, don't push any tasks anymore
                 return false; 
 
             retry_count++;
@@ -150,11 +157,11 @@ public:
             if(retry_count >16)
                 return false;
         }   
-        new_mail_arrived_.release();
+        new_mail_arrived_.release();        // Signal new mail has arrived 
         return true;
     }
 
-
+    // API to send a task from this actor to receiver actor
     bool send(std::shared_ptr<Actor<Task>> receiver,Task&& task,bool needs_ack = false)
     {
         if(!actor_alive_.load(std::memory_order_acquire))
@@ -176,7 +183,7 @@ public:
             
             std::shared_ptr<ActorSystem<Task>> owning_actor_system = owning_system_.lock();
             if(owning_actor_system)
-                owning_actor_system->unregisterActor(this->name_);
+                owning_actor_system->unregisterActor(this->name_);  // remove from registry so that name can be reused later
         }
     }
 
@@ -197,6 +204,7 @@ public:
 
 };
 
+// Packages a function and its arguments into a "Task" type, which is compatible to push in actor mailboxes
 template <typename Task, typename Func, typename... Args>
 Task constructTask(Func&& func, Args&&... args)
 {
@@ -204,14 +212,16 @@ Task constructTask(Func&& func, Args&&... args)
     return task;
 }
 
+
+// ActorSystems manage the lifecyle of group of Actors
 template <typename Task>
 class ActorSystem : public std::enable_shared_from_this<ActorSystem<Task>>
 {
 private:
-    std::atomic<size_t> active_actors_;
-    size_t total_actors_;
-    std::mutex registry_lock_;
-    std::unordered_map<std::string,std::weak_ptr<Actor<Task>>> actor_registry_;
+    std::atomic<size_t> active_actors_; // Tracks current active actors in the system
+    size_t total_actors_;   // The max no. of actors this ActorSystem can manage
+    std::mutex registry_lock_;  // lock to handle concurrent registers and unregisters for actors
+    std::unordered_map<std::string,std::weak_ptr<Actor<Task>>> actor_registry_; //maintain a actor registry to easily refer an actor by name
 
 public:
 
@@ -221,6 +231,7 @@ public:
         actor_pool_=std::vector<std::shared_ptr<Actor<Task>>>(numActors) ;
     }
 
+    // Add a newly spawned actor into our registry
     bool registerActor(std::shared_ptr<Actor<Task>> actor)
     {
         // Do not allow actor with no name
@@ -237,6 +248,7 @@ public:
         return true;
     }
 
+    // Get the actor pointer by name from our registry, just like a phonebook
     std::shared_ptr<Actor<Task>> getActor(const std::string& actor_name)
     {
         std::lock_guard<std::mutex> rlock(registry_lock_);
@@ -245,6 +257,7 @@ public:
         return actor_registry_[actor_name].lock();
     }
 
+    // Spawn a new actor and add register it in the system registry
     std::shared_ptr<Actor<Task>> spawn(size_t mailbox_capacity=1,std::string name="")
     {
         size_t curr_size;
@@ -291,6 +304,7 @@ public:
         return sender->send(receiver,std::move(task),needs_ack);
     }
 
+    // Send function to send any admin type messages from the ActorSystem to Actor
     bool send(const std::string& receiver_handle, Task&& task)
     {   
         auto receiver = getActor(receiver_handle);
@@ -305,6 +319,7 @@ public:
         return true;
     }
 
+    // remove actor from the phonebook once it is no longer active
     void unregisterActor(const std::string& actor_name)
     {
         std::lock_guard<std::mutex> rlock(registry_lock_);
@@ -316,10 +331,7 @@ public:
         for(size_t i=0;i<total_actors_;i++)
         {
             if(actor_pool_[i])
-            {
-                unregisterActor(actor_pool_[i]->name_);
                 actor_pool_[i]->stopActor();
-            }
         }
     }
 };
