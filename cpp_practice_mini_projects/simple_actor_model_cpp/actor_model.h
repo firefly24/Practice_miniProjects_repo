@@ -278,6 +278,13 @@ public:
                 }
                 // register actor failed, rollback active actors
                 active_actors_.fetch_sub(1,std::memory_order_release);
+                /* in case where multiple threads are calling spawn on same actor system, I see this rollback mechanism might fail.
+                    Because by the time this rollback hits, another thread might have spawned a new actor and incremented the index.
+                    this rollback will render that slot invalid, and waste the current slot also 
+                    So for now, I am assuming that only a single thread can call spawn on an actor system, and actors are spawned sequentially
+                    -(can this be enforced by using unique ptr for ActorSystem ?)
+                    TODO: How will this work in multithreaded spawn calls ?
+                    */
                 return {};
             }
             std::this_thread::yield();
