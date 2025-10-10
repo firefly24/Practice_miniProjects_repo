@@ -24,6 +24,26 @@ enum class ActorState : size_t {
     MAX_STATE
 };
 
+enum class RecoveryMechanism : size_t {
+    RESTART,
+    STOP,
+    REPLACE,
+    IGNORE,
+    MAX_MECHANISM
+};
+
+struct ActorParameters
+{
+    size_t mailbox_size;
+    size_t idx;
+    std::string name;
+
+    ActorParameters(){}
+
+    ActorParameters(size_t mailbox_size_, size_t idx_, std::string name_ = "") : 
+                    mailbox_size(mailbox_size_),idx(idx_), name(name_)  {}
+};
+
 template <typename Task>
 struct Message{
     Task task;
@@ -58,6 +78,7 @@ class Actor: public std::enable_shared_from_this<Actor<Task>>
 {
 private:
     std::unique_ptr<mpmcQueueBounded<Message<Task>>> mailbox_q;  //Actor mailbox, using lock-free mpmc queue (only one consumer being self)
+    size_t mailbox_size_;
     std::atomic<bool> actor_alive_; // flag to track if actor is alive to receive msgs
     std::thread dispatcher_;    // dispatcher thead that keeps checking mailbox for new tasks to execute
     std::counting_semaphore<> new_mail_arrived_{0}; // use counting semaphore to keep track of tasks in the maibox waiting to be picked
@@ -107,9 +128,7 @@ private:
                 actor_state_.store(ActorState::FAILED,std::memory_order_release);
 
                 if(auto actor_system = owning_system_.lock())
-                {
                     actor_system->logFailure(this->name_,std::move(msg));
-                }
             }
         }
     }
@@ -117,7 +136,6 @@ private:
     // Once actor is stopped, flushes out mailbox
     void drainMailbox()
     {
-        //std::cout << "Entering Drain mailbox" << std::endl;
         // Flush out all tasks remaining in the queue by executing them
         Message<Task> remaining_msg;
         while(mailbox_q->try_pop(remaining_msg))
@@ -133,7 +151,6 @@ private:
             }
             catch(...)
             {
-                //std::cout << "Exception Caught in DrainMailbox" <<std::endl;
                 if(auto actor_system = owning_system_.lock())
                     actor_system->logFailure(this->name_,std::move(remaining_msg));
                 return;
@@ -152,10 +169,13 @@ private:
 public:
     size_t id_; // Keeping a actor id to identify an actor, will decide in future how to use this
     std::string name_; //Have an actor name, to get pretty logs!
+    RecoveryMechanism recovery_strategy_;   // Add recovery strategy if actor stops
 
-    Actor(size_t mailbox_size, size_t id):actor_alive_(true),actor_state_(ActorState::CREATED),id_(id)
+    Actor(size_t mailbox_size, size_t id)
+            :mailbox_size_(mailbox_size),actor_alive_(true),actor_state_(ActorState::CREATED),id_(id)
     {
         name_ ="";
+        recovery_strategy_ = RecoveryMechanism::RESTART;
         mailbox_q = std::make_unique<mpmcQueueBounded<Message<Task>>>(mailbox_size);
         dispatcher_ = std::thread([this](){
                                             this->actor_state_.store(ActorState::RUNNING,std::memory_order_release);
@@ -164,14 +184,15 @@ public:
     }
 
     Actor(size_t mailbox_size, size_t id,std::string name)
-        :actor_alive_(true),actor_state_(ActorState::CREATED),id_(id),name_(name)
+        :mailbox_size_(mailbox_size),actor_alive_(true),actor_state_(ActorState::CREATED),id_(id),name_(name)
     {
+        recovery_strategy_ = RecoveryMechanism::RESTART;
         mailbox_q = std::make_unique<mpmcQueueBounded<Message<Task>>>(mailbox_size);
         actor_state_.store(ActorState::RUNNING,std::memory_order_release);
         dispatcher_ = std::thread([this](){
                                             this->actor_state_.store(ActorState::RUNNING,std::memory_order_release);
                                             checkMailbox();
-                                        });                  
+                                        }); //Start check mailbox loop                  
     }
 
     // We want our actor to keep a reference to the owning actor system that spawned it, 
@@ -190,6 +211,13 @@ public:
     bool isFailedState()
     {
         return (actor_state_.load(std::memory_order_acquire) == ActorState::FAILED);
+    }
+
+    void getActorProperties(ActorParameters &actor_parameters)
+    {
+        actor_parameters.mailbox_size = mailbox_size_;
+        actor_parameters.idx = id_;
+        actor_parameters.name = name_;
     }
 
     // Push a task to this actor's mailbox
@@ -302,6 +330,7 @@ public:
             std::cout << "Name: "<<actor->name_<<" is taken" << std::endl;
             return false;
         }
+        std::cout << "Registering Actor: " << actor->name_ << " " << actor.get()<<  std::endl;
         actor_registry_[actor->name_] = std::weak_ptr<Actor<Task>>(actor);
         return true;
     }
@@ -324,18 +353,17 @@ public:
             // when we want to spawn an actor at a specific index, 
             //specially when an already existing actor fails and stops, and as part of recovery mechanism, we respawn same actor
             // I will use this spawn with idx later, for adding recovery mechanisms
-            if (idx != -1) // if idx is in valid range
+            if ((idx != -1) && 
+                (idx >= 0 && (size_t)idx< total_actors_ ) ) // if idx is in valid range
             {
-                if (idx >= 0 && (size_t)idx< total_actors_ )
-                {
-                    std::shared_ptr<Actor<Task>> new_actor= std::make_shared<Actor<Task>>(mailbox_capacity,curr_size,name);
+                std::shared_ptr<Actor<Task>> new_actor= std::make_shared<Actor<Task>>(mailbox_capacity,curr_size,name);
 
-                    if ( registerActor(new_actor) )
-                    {
-                        new_actor->setActorSystem(this->shared_from_this());
-                        actor_pool_[idx] = new_actor;
-                        return new_actor;
-                    }
+                if ( registerActor(new_actor) )
+                {
+
+                    new_actor->setActorSystem(this->shared_from_this());
+                    actor_pool_[idx] = new_actor;
+                    return new_actor;
                 }
             }
 
@@ -412,17 +440,28 @@ public:
         while(1)
         {
             std::unique_lock<std::mutex> cleanup_lock(cleanup_mtx_);
-
             actors_pending_cleanup_.wait(cleanup_lock,[this](){return !binned_actor_idx.empty(); });
             
             actor_to_cleanup_idx = binned_actor_idx.front();
             binned_actor_idx.pop();
-
             cleanup_lock.unlock();
             
             if ((size_t)actor_to_cleanup_idx == total_actors_) // Sentinel to stop cleanup thread
                     return;
 
+            if (auto actor = actor_pool_[actor_to_cleanup_idx])
+            {
+                if (actor->recovery_strategy_ == RecoveryMechanism::RESTART )
+                {
+                    ActorParameters failed_actor_params;
+                    actor->getActorProperties(failed_actor_params);
+                    // Since only failed actors come to this path, we have already set actor_alive_ as false
+                    unregisterActor(actor_to_cleanup_idx);
+
+                    auto renewed_actor = spawn(failed_actor_params.mailbox_size,failed_actor_params.name,actor_to_cleanup_idx);
+                    continue;
+                }
+            }
             unregisterActor(actor_to_cleanup_idx);
         }
     }
@@ -448,12 +487,6 @@ public:
         }
     }
 
-    // Stop the actor and unregister from registry 
-    void notifyActorStopped(int actor_id)
-    {
-        unregisterActor(actor_id);
-    }
-
     void recoveryPolicy(std::shared_ptr<Actor<Task>> actor)
     {
         std::cout <<"Add recovery policy here for Actor: " << actor->name_ << std::endl;
@@ -466,7 +499,7 @@ public:
         std::lock_guard<std::mutex> rlock(registry_lock_);
         if (actor_pool_[idx])
         {
-            std::cout << "Unregistering actor: " << actor_pool_[idx]->name_ << std::endl;
+            std::cout << "Unregistering actor: " << actor_pool_[idx]->name_ <<  "  " << actor_pool_[idx].get() <<std::endl;
             actor_registry_.erase(actor_pool_[idx]->name_);
             actor_pool_[idx].reset();
         }
