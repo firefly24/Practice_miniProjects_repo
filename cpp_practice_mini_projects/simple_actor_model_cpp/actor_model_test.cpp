@@ -5,11 +5,12 @@
 
 using Job = std::function<void()> ;
 
-void pingpong(std::shared_ptr<Actor<Job>> sender, std::shared_ptr<Actor<Job>> receiver)
+void pingpong(std::shared_ptr<Actor<Job>> sender, std::shared_ptr<Actor<Job>> receiver,int itr)
 {
-    std::cout << "Ping" << std::endl;
-
+    std::cout << "Ping: " <<itr << std::endl;
     Job getack = [](){std::cout << "Pong" << std::endl; };
+    if (itr == 5)
+        throw std::runtime_error("Testing a exception flow");
     receiver->send(sender,std::move(getack));
 }
 
@@ -17,11 +18,16 @@ void testPingpong()
 {
     std::shared_ptr<ActorSystem<Job>> ActorAdmin = std::make_shared<ActorSystem<Job>>(2);
 
-    std::shared_ptr<Actor<Job>> pinger = ActorAdmin->spawn(3,"Pinger");
-    std::shared_ptr<Actor<Job>> responder = ActorAdmin->spawn(3,"Responder");
+    std::shared_ptr<Actor<Job>> pinger = ActorAdmin->spawn(4,"Pinger");
+    std::shared_ptr<Actor<Job>> responder = ActorAdmin->spawn(4,"Responder");
 
-    //for(int i=0;i<10;i++)
-        ActorAdmin->send("Pinger","Responder",constructTask<Job>(pingpong,pinger,responder),true);
+    for(int i=0;i<10;i++)
+    //int i=0;
+    {
+        ActorAdmin->send("Pinger","Responder",constructTask<Job>(pingpong,pinger,responder,i),true);
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
 
     //pinger->sendMsg(responder,constructTask<Job>(pingpong,pinger,responder));
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
