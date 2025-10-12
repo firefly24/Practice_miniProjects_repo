@@ -16,3 +16,19 @@ I am sending messages of struct {senderActor,receiverActor,task} instead of just
 Now instead of senderActor to be just a reference to actor, I can send a handle to the senderActor as reply_to:
 if the sender expects a reply, attach sender reference to msg.reply_to , if sender doesn't expect a response, this can be set to null.
 Can I remove "receiverActor" field from msg struct ? 
+
+11/10/2025
+Write my own RAII style guard for atomic counter -(Found no use for it so erased it)
+
+
+12/10/2025
+Moved the actor model to threadpool type execution, as previously each actor had its own dispatcher thread, which is not scalable as thousands of actors might be created.
+I need to refine the actor recovery mechanism now, as when an actor fails, in most cases the old actor shared ptr is still used instead of the respawned actor
+
+Focus on:
+Move semantics, perfect forwarding — understand how they affect performance and design.
+Templates & type traits (std::enable_if, concepts, SFINAE basics).
+RAII patterns — smart pointer strategies, scoped cleanup, unique_ptr + custom deleters.
+Standard concurrency utilities — std::jthread, std::stop_token, std::latch, std::barrier.
+
+
