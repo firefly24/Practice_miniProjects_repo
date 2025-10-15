@@ -176,8 +176,12 @@ public:
         if (!actor_alive_.load(std::memory_order_acquire))
             return false;
 
-        while (!mailbox_q->try_push(std::move(msg)) && (++retry_loop > 10) )
+        while (!mailbox_q->try_push(std::move(msg)) )
+        {
+            if ((++retry_loop < 10) )
                 return false;
+            std::this_thread::yield();
+        }
 
         bool expected_draining = false;
         if (is_draining_.compare_exchange_strong(expected_draining,true,std::memory_order_acq_rel))
@@ -207,16 +211,20 @@ public:
         }
         catch(const std::exception& e)
         {
-            std::cout <<name_ << ": Exception caught while draining: " << e.what()<<  std::endl;
-            actor_alive_.store(false,std::memory_order_release);
-            actor_state_.store(ActorState::FAILED,std::memory_order_release);
-
-            if(auto actor_system = owning_system_.lock())
+            if (actor_alive_.exchange(false,std::memory_order_acq_rel) && 
+                (actor_state_.load(std::memory_order_acquire) != ActorState::FAILED))
             {
-                actor_system->logFailure(name_,std::move(msg));
-                actor_system->notifyActorFailure(id_);
+                actor_state_.store(ActorState::FAILED,std::memory_order_release);
+                //if (actor_state_.compare_exchange_strong())
+
+                if(auto actor_system = owning_system_.lock())
+                {
+                    actor_system->notifyActorFailure(id_);
+                    actor_system->logFailure(name_,std::move(msg));
+                }
             }
-            //return;
+            std::cout <<name_ << ": Exception caught while draining: " << e.what()<<  std::endl;
+            return;
         }
         //if (msg.request_reply)
          //       handleReply(msg,true);
@@ -255,6 +263,10 @@ public:
         {
             actor_alive_.store(false,std::memory_order_release);
             std::cout << "Stopping Actor: " << name_ << std::endl;
+            while(is_draining_.load(std::memory_order_acquire))
+            { 
+                std::this_thread::yield();
+            }
             actor_state_.store(ActorState::STOPPED,std::memory_order_release);
         }
     }
@@ -263,7 +275,10 @@ public:
     ~Actor()
     {
         std::cout << name_ << ": Destrutor Called" << std::endl;
-        stopActor();
+
+        ActorState expected = actor_state_.load(std::memory_order_acquire);
+        if (expected != ActorState::STOPPED)
+            stopActor();
     }
 
     //delete copy constructors
@@ -324,8 +339,9 @@ public:
         }
         actor_pool_[requested_id] = std::make_unique<Actor<Task>>(mailbox_capacity,requested_id,requested_name);
         actor_pool_[requested_id]->setActorSystem(this->shared_from_this());
-        actor_registry_[requested_name] = requested_id;
-        std::cout << "Registering Actor: " << requested_name << ": " << actor_pool_[requested_id].get()<<  std::endl;
+
+        actor_registry_.emplace(requested_name,requested_id);
+        std::cout<<"Registering Actor: "<<actor_pool_[requested_id]->name_<<": "<<actor_pool_[requested_id].get()<<std::endl;
         return true;
     }
 
@@ -394,7 +410,7 @@ public:
     }
 
     //void notifyMailboxActive(std::weak_ptr<Actor<Task>> weak_actor)
-    void notifyMailboxActive(size_t& actor_id)
+    void notifyMailboxActive(size_t actor_id)
     {
         std::cout << "notifyMailboxActive invoked" << std::endl;
         worker_pool_.tryPush([this,actor_id]() { if(this->actor_pool_[actor_id])
@@ -404,7 +420,7 @@ public:
 
     // Helper function to send msg based on actor name instead of pointers, from sender -> receiver actor
 
-    // Actor::send() will delegate the send task to ActorSystem
+    // send() by receiver id
     bool send(size_t& receiver_id, Message<Task>&& msg)
     {
         if(!actor_pool_[receiver_id])
@@ -412,6 +428,7 @@ public:
         return actor_pool_[receiver_id]->addToMailbox(std::move(msg));
     }
 
+    // send() by receiver name
     bool send(const std::string& receiver_name, Message<Task>&& msg)
     {   
         if (!actor_registry_.contains(receiver_name))
@@ -419,6 +436,7 @@ public:
         return send(actor_registry_[receiver_name],std::move(msg));
     }
 
+    // Keeping this api , when I want to send nested tasks, so task wrapping in msg will be on the fly
     bool send(const std::string& sender_name,const std::string& receiver_name, Task&& task,bool needs_ack)
     {   
         if (!actor_registry_.contains(sender_name) || (!actor_pool_[actor_registry_[sender_name]]))
@@ -437,7 +455,7 @@ public:
 
     void cleanup_actors()
     {
-        int actor_to_cleanup_idx;
+        size_t actor_to_cleanup_idx;
 
         while(1)
         {
@@ -461,6 +479,7 @@ public:
                     unregisterActor(actor_to_cleanup_idx);
 
                     auto renewed_actor = spawn(failed_actor_params.mailbox_size,failed_actor_params.name,actor_to_cleanup_idx);
+                    //registerActor(actor_to_cleanup_idx,failed_actor_params.name,failed_actor_params.mailbox_size );
                     continue;
                 }
             }
@@ -498,6 +517,7 @@ public:
         std::unique_lock<std::shared_mutex> rlock(registry_lock_);
         if (actor_pool_[idx])
         {
+            actor_pool_[idx]->stopActor();
             actor_registry_.erase(actor_pool_[idx]->name_);
             std::cout << "Unregistering actor: " << actor_pool_[idx]->name_ <<  ":  " << actor_pool_[idx].get() <<std::endl;
             actor_pool_[idx].reset();
@@ -506,14 +526,16 @@ public:
 
     ~ActorSystem()
     {
-        {
-            std::unique_lock<std::mutex> cleanup_lock(cleanup_mtx_);
-            binned_actor_idx.push(total_actors_);
-        }
-        actors_pending_cleanup_.notify_all();
-
+        worker_pool_.stopPool();
         if (cleanup_thread_.joinable())
+        {
+            {
+                std::unique_lock<std::mutex> cleanup_lock(cleanup_mtx_);
+                binned_actor_idx.push(total_actors_);
+            }
+            actors_pending_cleanup_.notify_all();
             cleanup_thread_.join();
+        }
 
         for(size_t i=0;i<total_actors_;i++)
             unregisterActor(i);
