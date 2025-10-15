@@ -1,70 +1,133 @@
-A simple Actor System Design
+# Simple Actor System Design (Draft)
 
-1. Core Goals:
-- I am trying to design a simple actor framework model in c++ which might be useful as a lightweight message passing mechanism in any embedded/low latency systems projects I might take up in future.
-- I want to learn to build concurrency systems through this project, and learn to use lock-free concurrency concepts, mutexes, and optimizing thread usage. 
-- Eventually I want to improve my design incrementally and learn various optimization techniques and how to handle design trade-offs etc.
+## 1. Core Goals
 
-2. Main core components of my system: 
+- **Purpose:** Design a lightweight C++ Actor Framework suitable for embedded or low-latency systems.
+- **Learning Focus:** Explore concurrency patterns, lock-free design, mutex usage, and thread optimization.
+- **Long-Term Objective:** Incrementally improve the system and gain experience with optimization, recovery handling, and design trade-offs.
 
-Task - a unit of work we want to get performed
+---
 
-Actor - it is the main entity of the system that is responsible for communication, it is responsible for processing any msgs/tasks that are pushed into its mailbox. In User programs, an actor can be used via its Actor handle.
+## 2. Core Components
 
-ActorSystem – It represents the actor system as a whole, and it owns all actors it spawned, it manages the lifecyle and choreograhs all the actors it owns. It also holds ownership of a threadpool, which has worker threads to execute actors' tasks.
+| Component | Description |
+|------------|--------------|
+| **Task** | A unit of work to be performed by an actor. |
+| **Message** | Wraps a Task and metadata into a single transferable entity. |
+| **Actor** | Main active entity that processes messages from its mailbox. |
+| **ActorSystem** | The orchestrator that owns all actors, manages lifecycles, threadpools, and recovery. |
+| **ActorHandle** | A lightweight, non-owning reference to an actor, identified by `{id, name}`. |
+| **Mailbox** | Internal queue that buffers tasks/messages awaiting execution. |
+| **ThreadPool** | Worker threads that drain actor mailboxes and execute queued tasks. |
+| **Cleanup/Recovery Thread** | Monitors actor failures and respawns replacements. |
 
-ActorHandle – This is a lightweight referencing mechanism to address any actor by the user program - which uses an actor id, or actor name, or both.
+> 💡 *Future addition: Insert diagram of component relationships.*
 
-ThreadPool – a set of worker threads that pick up and execute the pending/live tasks in actors' mailboxes.
+---
 
-Message – wraps a task and metadata into a single Msg object, so that it can be a uniform entity to pass seamlessly around mailboxes.
+## 3. Ownership Model
 
-# Add image for control flow strategy 
+**Notes:**
+- `ActorSystem` has exclusive ownership of all actors (`unique_ptr`).
+- Each `Actor` owns its `Mailbox`, which contains `Task` objects.
+- `ActorHandle` is a *non-owning reference* (stores `{id, name}` only).
+- `ThreadPool` workers execute mailbox tasks, but **tasks from a single actor never run concurrently.**
 
-3. Ownership Model 
-ActorSystem -> owns a pool unique Actors, owns a Threadpool, owns a Cleanup-recovery thread
-Actor -> owns a Mailbox, it is a unique_ptr
-Mailbox -> holds a lists of Tasks for the actor
-Task -> a small unit of work
-Threadpool ->owns few Worker threads
-Cleanup-recovery thread -> actively cleans up and recovers failed actors
-Worker threads -> execute tasks from actor Mailbox
-Message -> encapsulates Task and its metadata
-ActorHandle -> a lightweight non-owning reference to an actor
+> 💡 Consider adding a short “Design Invariants” section:
+> - One `drainMailbox()` per actor at a time  
+> - Actor lifetimes managed solely by `ActorSystem`  
+> - `ActorHandle` validity checked before routing
 
-4. Actor Lookup strategy
-- User program can access an Actor through an ActorHandle {Id,name}
-- For fast lookup of an Actor, use actor Id to reference the required actor from Actor Pool
-- In cases were actor id can't be used, for better readability actor name can be used. It involves looking up the actor id using actor name in the actor registry map : actor_name -> actor_id
-- If an actor fails, a new actor unique_ptr object is created for the same id and name, replacing the failed actor object.
-So for any external user, the handle remains the same, and it does not need to handle any failure/recovery explicitly.
+---
 
-5. Message Flow
-- An Sender_Actor::send() triggers a send to Receiver_Actor. Sender_Actor::send() notifies the ActorSystem to route the msg to correct receiver. ActorSystem::send() will then lookup the Receiver_Actor by name and add the Msg to Receiver_Actor::AddtoMailbox(msg).
-- If the mailbox of Receiver_Actor was previously empty, trigger a drainMailbox() from the Threadpool to schedule execution of the queued msgs.
+## 4. Actor Lookup Strategy
 
-6. ThreadPool usage
-- Schedules the tasks queued in actor Mailbox to be executed by worker threads
-- An Actor's queued tasks will not run concurrently at the same time on different threads.
-- This threadpool also has a fixed size internal queue where the drains will wait to be picked up. I am not expecting the need for unbounded queue here, as this queue does not hold the actual number of tasks, but just a notifiction to trigger drainMailbox
+- **Primary lookup:** via `actor_id` → O(1) access in `actor_pool_`.
+- **Secondary lookup:** via `actor_name` → resolved to `actor_id` through an `actor_registry` map (`std::unordered_map<std::string, size_t>`).
+- **Failure replacement:**  
+  When an actor fails:
+  - The same `{id, name}` entry is reused for the new actor.
+  - `ActorHandle` remains valid across restarts — user code does not manage recovery.
 
-7. Recovery and Fault Handling
-- If a Task throws -> the owning Actor fails -> Actor stops new msgs/tasks and notifies ActorSystem of Failure -> ActorSystem will log the failure -> ActorSystem unregister the Actor and destroy the failed Actor object cleanly -> ActorSystem spawns a new duplicate Actor with the same Id and name and replaces the old Actor.
+> 💡 Optional enhancement: add lookup caching or lock-free registry map if scalability becomes an issue.
 
-8. Open Questions
-- How to handle reply mechanisms, when an actor expects a receiver reply or an acknowledgement
-- Do we drop pending mailbox msgs of failed actor, or carry them forward to be executed by restarted actor
-- How do we handle the msgs lost between Actor Fail to Restart, do we keep waiting for Actor to respawn or drop them.
-- How to handle tasks that have a return value, how big is the impact of using packaged_tasks/futures/asyncs for this
-- What all recovery strategies we can add later on apart from restart.
-- Implement Supervision tree style actor framework later if possible.
+---
 
-9. Future Enhancements
-- Add reply mechanism
-- add different scheduling policies per Actor
-- Add more Actor recovery strategies
-- Add logging and performance metrics data collection
-- Add live queriying of system health stats
+## 5. Message Flow
 
+> 💡 *Placeholder: Add a sequence diagram here.*
 
+Example flow:
+
+**Key Rules:**
+- If ReceiverActor’s mailbox transitions from empty → non-empty, the system triggers a drain request to the threadpool.
+- Threadpool workers process messages sequentially per actor.
+- Tasks from the same actor **never execute concurrently.**
+
+---
+
+## 6. ThreadPool Model
+
+- Fixed-size pool of worker threads.
+- Uses an internal **drain queue**, not a task queue — each entry signals that an actor’s mailbox needs draining.
+- The threadpool repeatedly:
+  1. Waits for drain requests.
+  2. Dequeues one.
+  3. Executes that actor’s `drainMailbox()` until empty.
+- Prevents multiple workers from draining the same actor simultaneously.
+
+> 💡 Consider naming this queue `drain_queue_` to distinguish it from standard task queues.
+
+---
+
+## 7. Recovery and Fault Handling
+
+1. **If a task throws:**
+   - The owning actor is marked as *failed*.
+   - The actor stops accepting new messages.
+   - ActorSystem logs the failure and unregisters the actor.
+   - The cleanup thread destroys the failed actor (`unique_ptr::reset()`).
+   - A new actor instance is spawned with the same `{id, name}` and replaces it.
+
+2. **Design note:**  
+   Pending messages can either:
+   - Be dropped, or  
+   - Be re-queued to the new actor’s mailbox.
+
+> 💡 Decision pending — clarify whether mailboxes are reset or transferred after recovery.
+
+---
+
+## 8. Open Questions
+
+- How to design reply or acknowledgement mechanisms between actors?
+- Should pending mailbox messages of a failed actor be preserved or dropped?
+- What happens to messages sent during the actor’s restart window?
+- How to support return values from tasks (e.g., via `std::future` / `packaged_task`)?
+- What recovery strategies can we support beyond restart (e.g., exponential backoff, fail-fast, quarantine)?
+- Could we later introduce **supervision trees** like Erlang’s model?
+
+---
+
+## 9. Future Enhancements
+
+- [ ] Implement reply/ack mechanisms between actors.  
+- [ ] Add configurable actor scheduling policies.  
+- [ ] Extend recovery strategies (restart, escalate, stop).  
+- [ ] Integrate logging and performance metrics.  
+- [ ] Add live system health monitoring APIs.  
+- [ ] Implement supervision trees for hierarchical fault tolerance.  
+- [ ] Add metrics for mailbox utilization and message latency.
+
+---
+
+## 10. References (Optional)
+
+- [Erlang/OTP Design Principles](https://www.erlang.org/doc/design_principles/des_princ)
+- [CAF: C++ Actor Framework](https://actor-framework.org/)
+- [Akka Actor Model Concepts](https://doc.akka.io/docs/akka/current/typed/actors.html)
+
+---
+
+> ✳️ *Draft version by Darshana Hotkar – ongoing experimental project for learning concurrency and actor-based system design in C++.*
 
