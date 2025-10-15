@@ -12,7 +12,7 @@ void pingpong(std::string& sender, std::string& receiver,int itr)
     Job getack = [](){std::cout << "Pong" << std::endl; };
     if (itr == 5)
         throw std::runtime_error("Testing a exception flow");
-    receiver->send(sender,std::move(getack));
+    //receiver->send(sender,std::move(getack));
     
 }
 
@@ -20,12 +20,12 @@ void testPingpong()
 {
     std::shared_ptr<ActorSystem<Job>> ActorAdmin = std::make_shared<ActorSystem<Job>>(2);
 
-    std::shared_ptr<Actor<Job>> pinger = ActorAdmin->spawn(4,"Pinger");
-    std::shared_ptr<Actor<Job>> responder = ActorAdmin->spawn(4,"Responder");
+    ActorHandle pinger = ActorAdmin->spawn(4,"Pinger");
+    ActorHandle responder = ActorAdmin->spawn(4,"Responder");
 
     for(int i=0;i<10;i++)
     {
-        ActorAdmin->send("Pinger","Responder",constructTask<Job>(pingpong,pinger,responder,i));
+        ActorAdmin->send(pinger.name,responder.name,constructTask<Job>(pingpong,pinger.name,responder.name,i),false);
         std::this_thread::sleep_for(std::chrono::microseconds(50));
     }
     //pinger->sendMsg(responder,constructTask<Job>(pingpong,pinger,responder));
@@ -34,6 +34,7 @@ void testPingpong()
     return;
 }
 
+/*
 void testActorSystem()
 {
     std::shared_ptr<ActorSystem<Job>> ActorAdmin = std::make_shared<ActorSystem<Job>>(2);
@@ -62,7 +63,7 @@ void testActorSystem()
 
     //ActorAdmin.send("Leader","Actor1",constructTask<Job>(repeated_task,myFunc,10));
 
-    /*
+    
     if (done)
     {
         auto end = std::chrono::high_resolution_clock::now();
@@ -72,9 +73,10 @@ void testActorSystem()
         std::cout << "Elements:" << total_msgs << "\nTime taken: " << time_taken << "ms\nThroughput: " << throughput << std::endl;
 
     }
-    */
+    
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 }
+*/
 
 
 int main()

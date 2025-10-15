@@ -31,4 +31,19 @@ Templates & type traits (std::enable_if, concepts, SFINAE basics).
 RAII patterns — smart pointer strategies, scoped cleanup, unique_ptr + custom deleters.
 Standard concurrency utilities — std::jthread, std::stop_token, std::latch, std::barrier.
 
+14/10/2025:
+1. Actor system hold the ownership of all actors inside the system, and any external party should use only actor handles to access the actors. 
+2. For send(), notify new msg etc, the actor only notifies the actorsystem, and the latter is responsible for actually handling the tasks. 
+    ->Scheduling/dispatch — which thread runs what → belongs to ActorSystem
+    ->Mail delivery — pushing messages into mailboxes → belongs to the receiver actor
+3. In case of actor and failure and recovery, the new spawned actor's pointer will change, but handle is consistent
+
+Actors → do work, know only handles.
+ActorSystem → owns actors, does all routing.
+Handles → the only public-facing identifiers.
+send() → user always calls through ActorSystem.
+
+15/10/2025
+
+Feeling ambitious, changing actors ref from shared ptr to unqiue ptrs
 

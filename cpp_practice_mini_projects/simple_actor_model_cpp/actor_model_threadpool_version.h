@@ -35,6 +35,14 @@ enum class RecoveryMechanism : size_t {
     MAX_MECHANISM
 };
 
+struct ActorHandle
+{
+    size_t idx;
+    std::string name;
+    ActorHandle(): idx(0), name("") {}
+    ActorHandle(size_t id, const std::string& actor_name ): idx(id),name(actor_name) {}
+};
+
 struct ActorParameters
 {
     size_t mailbox_size;
@@ -48,6 +56,7 @@ struct ActorParameters
 };
 
 // RAII style mailbox counter decrement to ensure mailbox msg count is decremented with every pop
+/*
 struct MailCounterGuard{
     std::atomic<size_t>& counter;
 
@@ -61,23 +70,23 @@ struct MailCounterGuard{
         counter.fetch_sub(1,std::memory_order_acq_rel);
     }
 };
+*/
 
 template <typename Task>
-struct Message{
+struct Message {
     Task task;
-    std::weak_ptr<Actor<Task>> sender;
-    std::string sender_handle;
+    std::string sender_name;
     bool request_reply;
     std::chrono::time_point<std::chrono::steady_clock> timestamp;
 
     Message(){}
-    explicit Message(Task&& t, std::shared_ptr<Actor<Task>> sender_m, bool needs_ack = false) 
-        :task(std::move(t)), sender(std::weak_ptr<Actor<Task>>(sender_m)), request_reply(needs_ack)
+
+    explicit Message(Task&& t, std::string& sender_m, bool needs_ack = false) 
+        :task(std::move(t)), sender_name(sender_m), request_reply(needs_ack)
     {
-        if(sender_m)
-            sender_handle = sender_m->name_;
-        else
-            sender_handle="ADMIN";      //Assuming msg sent by unknown sender is admin msg by ActorSystem itself
+        //Assuming msg sent by unknown sender is admin msg by ActorSystem itself
+        if(sender_name == "")
+            sender_name="ADMIN";        
         timestamp = std::chrono::steady_clock::now();
     }
 
@@ -92,7 +101,7 @@ struct Message{
 };
 
 template <typename Task>
-class Actor: public std::enable_shared_from_this<Actor<Task>>
+class Actor
 {
 private:
     std::unique_ptr<mpmcQueueBounded<Message<Task>>> mailbox_q;  //Actor mailbox, using lock-free mpmc queue (only one consumer being self)
@@ -101,15 +110,19 @@ private:
     std::atomic<bool> actor_alive_; // flag to track if actor is alive to receive msgs
     std::weak_ptr<ActorSystem<Task>> owning_system_;
     std::atomic<ActorState> actor_state_;  // Records current state of the actor
-    std::weak_ptr<Actor<Task>> this_weak_ptr_;
 
     // Invoke if sender requests a reply, so send a successful acknowledgement to sender mailbox
+    /*
     void handleReply(const Message<Task>& msg, bool is_success=true)
     {
-        if (auto sender = msg.sender.lock())
-            send(sender,[this,is_success](){std::cout << "Message handled by Actor "<<this->name_ << ": " 
+        if (auto actor_system = owning_system_.lock() )
+        {
+            if(actor_system->getActor(msg.sender_name))
+                send(msg.sender_name,[this,is_success](){std::cout << "Message handled by Actor "<<this->name_ << ": " 
                                     << (is_success?"Successfully":"Failed") << std::endl;});
-    }
+        }
+    } 
+    */
 
 public:
     size_t id_; // Keeping a actor id to identify an actor, will decide in future how to use this
@@ -130,7 +143,6 @@ public:
     void setActorSystem(std::shared_ptr<ActorSystem<Task>> actor_system)
     {
         owning_system_ = std::weak_ptr<ActorSystem<Task>>(actor_system);
-        this_weak_ptr_ = std::weak_ptr<Actor<Task>>(this->shared_from_this());
     }
 
     std::shared_ptr<ActorSystem<Task>> getActorSystem()
@@ -164,27 +176,25 @@ public:
         if (!actor_alive_.load(std::memory_order_acquire))
             return false;
 
-        while (!mailbox_q->try_push(std::move(msg)))
-        {
-            retry_loop++;
-
-            if (retry_loop >10)
+        while (!mailbox_q->try_push(std::move(msg)) && (++retry_loop > 10) )
                 return false;
-        }
 
         bool expected_draining = false;
         if (is_draining_.compare_exchange_strong(expected_draining,true,std::memory_order_acq_rel))
             if (auto actor_system = owning_system_.lock())
-                actor_system->notifyMailboxActive(this_weak_ptr_);
+                actor_system->notifyMailboxActive(id_);
 
         return true;
     }
 
     // API to send a task from this actor to receiver actor
-    bool send(std::shared_ptr<Actor<Task>> receiver,Task&& task,bool needs_ack = false)
+    bool send(const std::string& receiver,Task&& task,bool needs_ack = false)
     {
-        if(actor_alive_.load(std::memory_order_acquire) && receiver )
-            return receiver->addToMailbox(Message<Task>{std::move(task),this->shared_from_this(),needs_ack});
+        if(actor_alive_.load(std::memory_order_acquire) )
+        {
+            if (auto actor_system = owning_system_.lock())
+                return actor_system->send(receiver,Message<Task>{std::move(task),name_,needs_ack});
+        }
         return false;
     }
 
@@ -203,13 +213,13 @@ public:
 
             if(auto actor_system = owning_system_.lock())
             {
-                actor_system->logFailure(this->name_,std::move(msg));
-                actor_system->notifyActorFailure(this->shared_from_this());
+                actor_system->logFailure(name_,std::move(msg));
+                actor_system->notifyActorFailure(id_);
             }
             //return;
         }
-        if (msg.request_reply)
-                handleReply(msg,true);
+        //if (msg.request_reply)
+         //       handleReply(msg,true);
     }
 
     // Once actor is stopped, flushes out mailbox
@@ -218,17 +228,19 @@ public:
         // Flush out all tasks remaining in the queue by executing them
         Message<Task> remaining_msg;
         while(actor_alive_.load(std::memory_order_acquire) && mailbox_q->try_pop(remaining_msg))
-        {
             handleMsg(std::move(remaining_msg));
-        }
+
         is_draining_.store(false,std::memory_order_release);
+
+        if (!actor_alive_.load(std::memory_order_acquire))
+            return;
 
         if (mailbox_q->try_pop(remaining_msg))
         {
             bool expected_draining = false;
             if (is_draining_.compare_exchange_strong(expected_draining,true))
                 if (auto actor_system = owning_system_.lock())
-                    actor_system->notifyMailboxActive(this_weak_ptr_);
+                    actor_system->notifyMailboxActive(id_);
             handleMsg(std::move(remaining_msg));
         }
 
@@ -258,9 +270,9 @@ public:
     Actor(const Actor&) = delete;
     Actor& operator=(const Actor&) = delete;
 
-    //set move constuctors to delete;
-    Actor(Actor&&) = delete;
-    Actor& operator=(Actor &&) = delete;
+    //set move constuctors to default;
+    Actor(Actor&&) = default;
+    Actor& operator=(Actor &&) = default;
 
 };
 
@@ -280,57 +292,62 @@ class ActorSystem : public std::enable_shared_from_this<ActorSystem<Task>>
 private:
     std::atomic<size_t> active_actors_; // Tracks current active actors in the system
     size_t total_actors_;   // The max no. of actors this ActorSystem can manage
+    std::vector<std::unique_ptr<Actor<Task>>> actor_pool_;
     std::shared_mutex registry_lock_;  // lock to handle concurrent registers and unregisters for actors
-    std::unordered_map<std::string,std::weak_ptr<Actor<Task>>> actor_registry_; //maintain a actor registry to easily refer an actor by name
+    std::unordered_map<std::string,size_t> actor_registry_; //maintain a actor registry to easily refer an actor by name
     std::condition_variable actors_pending_cleanup_;  // condition variable to control access to cleanup queue
     std::queue<size_t> binned_actor_idx;  // cleanup queue storing idx of actors to destroy
     std::thread cleanup_thread_; // Thread that keeps polling to pop from cleanup queue to destroy failed actors
     std::mutex cleanup_mtx_;    // Mutex to control access to cleanup queue
 
 public:
-    std::vector<std::shared_ptr<Actor<Task>>> actor_pool_;
     ThreadPool_Q worker_pool_;
 
     ActorSystem(size_t numActors):
                 active_actors_(0), total_actors_(numActors),
                 worker_pool_(numActors*4, NUM_WORKER_THREADS)
     {
-        actor_pool_=std::vector<std::shared_ptr<Actor<Task>>>(numActors);
+        actor_pool_=std::vector<std::unique_ptr<Actor<Task>>>(numActors);
         cleanup_thread_ = std::thread([this](){cleanup_actors();});
     }
 
     // Add a newly spawned actor into our registry
-    bool registerActor(std::shared_ptr<Actor<Task>> actor)
+    //bool registerActor(size_t& actor_id)
+    bool registerActor(size_t& requested_id,std::string& requested_name,size_t mailbox_capacity=1)
     {
-        // Do not allow actor with no name
-        if (actor->name_ == "")
-            return false;
-
         std::unique_lock<std::shared_mutex> wr_lock(registry_lock_);
-        if((actor_registry_.find(actor->name_) != actor_registry_.end()) && actor_registry_[actor->name_].lock())
+        if( (actor_pool_[requested_id]) 
+        || (actor_registry_.find(requested_name) != actor_registry_.end()) )
         {
-            std::cout << "Name: "<<actor->name_<<" is taken" << std::endl;
+            std::cout << "Actor id: " << requested_name << "already holds active actor" << std::endl;
             return false;
         }
-        actor_registry_[actor->name_] = std::weak_ptr<Actor<Task>>(actor);
-        wr_lock.unlock();
-        std::cout << "Registering Actor: " << actor->name_ << " " << actor.get()<<  std::endl;
+        actor_pool_[requested_id] = std::make_unique<Actor<Task>>(mailbox_capacity,requested_id,requested_name);
+        actor_pool_[requested_id]->setActorSystem(this->shared_from_this());
+        actor_registry_[requested_name] = requested_id;
+        std::cout << "Registering Actor: " << requested_name << ": " << actor_pool_[requested_id].get()<<  std::endl;
         return true;
     }
 
     // Get the actor pointer by name from our registry, just like a phonebook
+    /*
     std::shared_ptr<Actor<Task>> getActor(const std::string& actor_name)
     {
         std::shared_lock<std::shared_mutex> rlock(registry_lock_);
         if(actor_registry_.find(actor_name) == actor_registry_.end())
             return {};
-        return actor_registry_[actor_name].lock();
+        return actor_pool_[actor_registry_[actor_name]];
     }
+    */
 
     // Spawn a new actor and add register it in the system registry
-    std::shared_ptr<Actor<Task>> spawn(size_t mailbox_capacity=1,std::string name="",int idx=-1)
+    ActorHandle spawn(size_t mailbox_capacity=1,std::string name="",int idx=-1)
     {
-        size_t curr_size;
+        if (name == "")
+        {
+            std::cout << "Cannot create nameless Actor" << std::endl;
+            return {};
+        }
         while(1)
         {
             // when we want to spawn an actor at a specific index, 
@@ -339,32 +356,27 @@ public:
             if ((idx != -1) && 
                 (idx >= 0 && (size_t)idx< total_actors_ ) ) // if idx is in valid range
             {
-                std::shared_ptr<Actor<Task>> new_actor= std::make_shared<Actor<Task>>(mailbox_capacity,curr_size,name);
-
-                if ( registerActor(new_actor) )
-                {
-                    new_actor->setActorSystem(this->shared_from_this());
-                    actor_pool_[idx] = new_actor;
-                    return new_actor;
-                }
+                size_t idx_ = (size_t)idx;
+                if ( registerActor(idx_,name,mailbox_capacity) )
+                    return ActorHandle(idx_,actor_pool_[idx_]->name_);
+                
+                std::cout << "Actor creation failed for id: " << idx << std::endl;
+                return {};
             }
 
             // Actor System has reached max capacity, cannot add and spawn new actors 
-            curr_size = active_actors_.load(std::memory_order_relaxed);
-            if (curr_size >= total_actors_)
+            size_t available_slot_idx = active_actors_.load(std::memory_order_acquire);
+            if (available_slot_idx >= total_actors_)
                 return {};
 
             // method to spawn completely new actor for the first time, and not used for respawning failed actor
-            if (active_actors_.compare_exchange_strong(curr_size,curr_size+1, std::memory_order_release,std::memory_order_acquire))
+            if (active_actors_.compare_exchange_strong(available_slot_idx,available_slot_idx+1, std::memory_order_acq_rel))
             {
-                std::shared_ptr<Actor<Task>> new_actor= std::make_shared<Actor<Task>>(mailbox_capacity,curr_size,name);
+                //std::shared_ptr<Actor<Task>> new_actor= std::make_shared<Actor<Task>>(mailbox_capacity,curr_size,name);
 
-                if ( registerActor(new_actor) )
-                {
-                    new_actor->setActorSystem(this->shared_from_this());
-                    actor_pool_[curr_size] = new_actor;
-                    return actor_pool_[curr_size];
-                }
+                if ( registerActor(available_slot_idx,name,mailbox_capacity) )
+                    return ActorHandle(available_slot_idx,actor_pool_[available_slot_idx]->name_);
+
                 // register actor failed, rollback active actors
                 active_actors_.fetch_sub(1,std::memory_order_release);
                 /* in case where multiple threads are calling spawn on same actor system, I see this rollback mechanism might fail.
@@ -381,41 +393,46 @@ public:
         return {};
     }
 
-    void notifyMailboxActive(std::weak_ptr<Actor<Task>> weak_actor)
+    //void notifyMailboxActive(std::weak_ptr<Actor<Task>> weak_actor)
+    void notifyMailboxActive(size_t& actor_id)
     {
         std::cout << "notifyMailboxActive invoked" << std::endl;
-        worker_pool_.tryPush([weak_actor]() { if(auto actor = weak_actor.lock())
-                                                actor->drainMailbox();
+        worker_pool_.tryPush([this,actor_id]() { if(this->actor_pool_[actor_id])
+                                                this->actor_pool_[actor_id]->drainMailbox();
                                             });
     }
 
     // Helper function to send msg based on actor name instead of pointers, from sender -> receiver actor
-    bool send(const std::string& sender_handle,const std::string& receiver_handle, Task&& task, bool needs_ack=false)
-    {   
-        auto receiver = getActor(receiver_handle);
-        auto sender = getActor(sender_handle);
-        if (!receiver || !sender)
-            return false;        
 
-        return sender->send(receiver,std::move(task),needs_ack);
-    }
-
-    // Helper function overload, directly using actor pointers
-    bool send(std::shared_ptr<Actor<Task>> sender,std::shared_ptr<Actor<Task>> receiver,Task&& task,bool needs_ack=false)
+    // Actor::send() will delegate the send task to ActorSystem
+    bool send(size_t& receiver_id, Message<Task>&& msg)
     {
-        if(!receiver || !sender)
+        if(!actor_pool_[receiver_id])
             return false;
-        return sender->send(receiver,std::move(task),needs_ack);
+        return actor_pool_[receiver_id]->addToMailbox(std::move(msg));
     }
 
-    // Send function to send any admin type messages from the ActorSystem to Actor
-    bool send(const std::string& receiver_handle, Task&& task)
+    bool send(const std::string& receiver_name, Message<Task>&& msg)
     {   
-        auto receiver = getActor(receiver_handle);
-        if ( (!receiver) || (!receiver->addToMailbox(Message<Task>{std::move(task),{},false})) )
+        if (!actor_registry_.contains(receiver_name))
             return false;
+        return send(actor_registry_[receiver_name],std::move(msg));
+    }
 
-        return true;
+    bool send(const std::string& sender_name,const std::string& receiver_name, Task&& task,bool needs_ack)
+    {   
+        if (!actor_registry_.contains(sender_name) || (!actor_pool_[actor_registry_[sender_name]]))
+            return false;     
+        return actor_pool_[actor_registry_[sender_name]]->send(receiver_name,std::move(task),needs_ack);
+    }
+
+    // will be called when ActorSystem wants to send admin tasks to an actor directly
+    bool send(const std::string& receiver_name, Task&& task)
+    {   
+        if (!actor_registry_.contains(receiver_name)|| (!actor_pool_[actor_registry_[receiver_name]]))
+            return false; 
+        std::string admin = "";
+        return actor_pool_[actor_registry_[receiver_name]]->addToMailbox(Message<Task>{std::move(task),admin,false});
     }
 
     void cleanup_actors()
@@ -434,12 +451,12 @@ public:
             if ((size_t)actor_to_cleanup_idx == total_actors_) // Sentinel to stop cleanup thread
                     return;
 
-            if (auto actor = actor_pool_[actor_to_cleanup_idx])
+            if (actor_pool_[actor_to_cleanup_idx])
             {
-                if (actor->recovery_strategy_ == RecoveryMechanism::RESTART )
+                if (actor_pool_[actor_to_cleanup_idx]->recovery_strategy_ == RecoveryMechanism::RESTART )
                 {
                     ActorParameters failed_actor_params;
-                    actor->getActorProperties(failed_actor_params);
+                    actor_pool_[actor_to_cleanup_idx]->getActorProperties(failed_actor_params);
                     // Since only failed actors come to this path, we have already set actor_alive_ as false
                     unregisterActor(actor_to_cleanup_idx);
 
@@ -453,22 +470,25 @@ public:
 
     // If actor throws exception while handling a task, 
     //first we need to stop the actor from accepting new msgs, and then log this failure
-    void notifyActorFailure(std::shared_ptr<Actor<Task>> actor)
+    //void notifyActorFailure(std::shared_ptr<Actor<Task>> actor)
+    void notifyActorFailure(size_t& actor_id)
     {
         std::unique_lock<std::mutex> cleanup_lock(cleanup_mtx_);
-        binned_actor_idx.push(actor->id_);
+        binned_actor_idx.push(actor_id);
         cleanup_lock.unlock();
         actors_pending_cleanup_.notify_one();
     }
 
     // Just logs the failure if an exception occurs when an actor is executing a task
-    void logFailure(std::string actor_name,Message<Task>&& msg)
+    void logFailure(const std::string& failed_actor,Message<Task>&& msg)
     {
-        std::cout << "Terminating Actor: "<< actor_name<< " due to execption" << std::endl;
+        std::cout << "Terminating Actor: "<< failed_actor << " due to execption" << std::endl;
         if(msg.request_reply)
         {
-            if (auto sender = msg.sender.lock())
-                send(sender->name_,[actor_name](){std::cout << "Task failed with exception by Actor: "<< actor_name << std::endl;});
+            if (!actor_registry_.contains(msg.sender_name))
+                return ;
+            send(msg.sender_name,
+                        [failed_actor](){std::cout << "Task failed with exception by Actor: "<< failed_actor << std::endl;});
         }
     }
 
@@ -478,8 +498,8 @@ public:
         std::unique_lock<std::shared_mutex> rlock(registry_lock_);
         if (actor_pool_[idx])
         {
-            std::cout << "Unregistering actor: " << actor_pool_[idx]->name_ <<  "  " << actor_pool_[idx].get() <<std::endl;
             actor_registry_.erase(actor_pool_[idx]->name_);
+            std::cout << "Unregistering actor: " << actor_pool_[idx]->name_ <<  ":  " << actor_pool_[idx].get() <<std::endl;
             actor_pool_[idx].reset();
         }
     }
