@@ -101,6 +101,16 @@ struct Message {
 };
 
 template <typename Task>
+struct ActorSlot
+{
+    std::atomic<bool> is_valid;
+    std::unique_ptr<Actor<Task>> actor;
+
+    ActorSlot(): is_valid{false}, actor(nullptr){}
+    ActorSlot(std::unique_ptr<Actor<Task>> &&actor_): is_valid{true}, actor(std::move(actor_)) {}
+};
+
+template <typename Task>
 class Actor
 {
 private:
@@ -178,7 +188,7 @@ public:
 
         while (!mailbox_q->try_push(std::move(msg)) )
         {
-            if ((++retry_loop < 10) )
+            if ((++retry_loop > 10) )
                 return false;
             std::this_thread::yield();
         }
@@ -307,7 +317,7 @@ class ActorSystem : public std::enable_shared_from_this<ActorSystem<Task>>
 private:
     std::atomic<size_t> active_actors_; // Tracks current active actors in the system
     size_t total_actors_;   // The max no. of actors this ActorSystem can manage
-    std::vector<std::unique_ptr<Actor<Task>>> actor_pool_;
+    std::vector<ActorSlot<Task>> actor_slots_;
     std::shared_mutex registry_lock_;  // lock to handle concurrent registers and unregisters for actors
     std::unordered_map<std::string,size_t> actor_registry_; //maintain a actor registry to easily refer an actor by name
     std::condition_variable actors_pending_cleanup_;  // condition variable to control access to cleanup queue
@@ -322,7 +332,7 @@ public:
                 active_actors_(0), total_actors_(numActors),
                 worker_pool_(numActors*4, NUM_WORKER_THREADS)
     {
-        actor_pool_=std::vector<std::unique_ptr<Actor<Task>>>(numActors);
+        actor_slots_ = std::vector<ActorSlot<Task>>(numActors);
         cleanup_thread_ = std::thread([this](){cleanup_actors();});
     }
 
@@ -331,30 +341,23 @@ public:
     bool registerActor(size_t& requested_id,std::string& requested_name,size_t mailbox_capacity=1)
     {
         std::unique_lock<std::shared_mutex> wr_lock(registry_lock_);
-        if( (actor_pool_[requested_id]) 
-        || (actor_registry_.find(requested_name) != actor_registry_.end()) )
+
+        if(actor_slots_[requested_id].actor
+            || (actor_registry_.find(requested_name) != actor_registry_.end()))
         {
             std::cout << "Actor id: " << requested_name << "already holds active actor" << std::endl;
             return false;
         }
-        actor_pool_[requested_id] = std::make_unique<Actor<Task>>(mailbox_capacity,requested_id,requested_name);
-        actor_pool_[requested_id]->setActorSystem(this->shared_from_this());
+        actor_slots_[requested_id].actor = std::make_unique<Actor<Task>>(mailbox_capacity,requested_id,requested_name);
+        actor_slots_[requested_id].is_valid.store(true,std::memory_order_release);
+        actor_slots_[requested_id].actor->setActorSystem(this->shared_from_this());
 
         actor_registry_.emplace(requested_name,requested_id);
-        std::cout<<"Registering Actor: "<<actor_pool_[requested_id]->name_<<": "<<actor_pool_[requested_id].get()<<std::endl;
+        std::cout<<"Registering Actor: "<<actor_slots_[requested_id].actor->name_<<": "<<actor_slots_[requested_id].actor.get()<<std::endl;
         return true;
     }
 
     // Get the actor pointer by name from our registry, just like a phonebook
-    /*
-    std::shared_ptr<Actor<Task>> getActor(const std::string& actor_name)
-    {
-        std::shared_lock<std::shared_mutex> rlock(registry_lock_);
-        if(actor_registry_.find(actor_name) == actor_registry_.end())
-            return {};
-        return actor_pool_[actor_registry_[actor_name]];
-    }
-    */
 
     // Spawn a new actor and add register it in the system registry
     ActorHandle spawn(size_t mailbox_capacity=1,std::string name="",int idx=-1)
@@ -374,7 +377,7 @@ public:
             {
                 size_t idx_ = (size_t)idx;
                 if ( registerActor(idx_,name,mailbox_capacity) )
-                    return ActorHandle(idx_,actor_pool_[idx_]->name_);
+                    return ActorHandle(idx_,actor_slots_[idx_].actor->name_);
                 
                 std::cout << "Actor creation failed for id: " << idx << std::endl;
                 return {};
@@ -391,7 +394,7 @@ public:
                 //std::shared_ptr<Actor<Task>> new_actor= std::make_shared<Actor<Task>>(mailbox_capacity,curr_size,name);
 
                 if ( registerActor(available_slot_idx,name,mailbox_capacity) )
-                    return ActorHandle(available_slot_idx,actor_pool_[available_slot_idx]->name_);
+                    return ActorHandle(available_slot_idx,actor_slots_[available_slot_idx].actor->name_);
 
                 // register actor failed, rollback active actors
                 active_actors_.fetch_sub(1,std::memory_order_release);
@@ -413,8 +416,11 @@ public:
     void notifyMailboxActive(size_t actor_id)
     {
         std::cout << "notifyMailboxActive invoked" << std::endl;
-        worker_pool_.tryPush([this,actor_id]() { if(this->actor_pool_[actor_id])
-                                                this->actor_pool_[actor_id]->drainMailbox();
+
+        worker_pool_.tryPush([this,actor_id]() { if (this->actor_slots_[actor_id].actor 
+                                                    && this->actor_slots_[actor_id].is_valid.load(std::memory_order_acquire)
+                                                    )
+                                                        this->actor_slots_[actor_id].actor->drainMailbox();
                                             });
     }
 
@@ -423,9 +429,18 @@ public:
     // send() by receiver id
     bool send(size_t& receiver_id, Message<Task>&& msg)
     {
-        if(!actor_pool_[receiver_id])
+
+        if (!actor_slots_[receiver_id].is_valid.load(std::memory_order_relaxed))
             return false;
-        return actor_pool_[receiver_id]->addToMailbox(std::move(msg));
+
+        // Acquire the actor raw pointer for send
+        Actor<Task>* receiver = actor_slots_[receiver_id].actor.get();
+        if(!receiver)
+            return false;
+
+        if (actor_slots_[receiver_id].is_valid.load(std::memory_order_acquire))
+            return receiver->addToMailbox(std::move(msg));
+        return false;
     }
 
     // send() by receiver name
@@ -439,18 +454,27 @@ public:
     // Keeping this api , when I want to send nested tasks, so task wrapping in msg will be on the fly
     bool send(const std::string& sender_name,const std::string& receiver_name, Task&& task,bool needs_ack)
     {   
-        if (!actor_registry_.contains(sender_name) || (!actor_pool_[actor_registry_[sender_name]]))
-            return false;     
-        return actor_pool_[actor_registry_[sender_name]]->send(receiver_name,std::move(task),needs_ack);
+
+        auto it = actor_registry_.find(sender_name);
+        if ( (it != actor_registry_.end()) && actor_slots_[it->second].actor)
+        {
+            if(actor_slots_[it->second].is_valid.load(std::memory_order_acquire))
+                return actor_slots_[it->second].actor->send(receiver_name,std::move(task),needs_ack);
+        }
+        return false;
     }
 
     // will be called when ActorSystem wants to send admin tasks to an actor directly
     bool send(const std::string& receiver_name, Task&& task)
     {   
-        if (!actor_registry_.contains(receiver_name)|| (!actor_pool_[actor_registry_[receiver_name]]))
-            return false; 
-        std::string admin = "";
-        return actor_pool_[actor_registry_[receiver_name]]->addToMailbox(Message<Task>{std::move(task),admin,false});
+        auto it = actor_registry_.find(receiver_name);
+        if ( (it != actor_registry_.end()) && actor_slots_[it->second].actor)
+        {
+            std::string admin = "";
+            if(actor_slots_[it->second].is_valid.load(std::memory_order_acquire))
+                return actor_slots_[it->second].actor->addToMailbox(Message<Task>{std::move(task),admin,false});
+        }
+        return false;
     }
 
     void cleanup_actors()
@@ -469,12 +493,13 @@ public:
             if ((size_t)actor_to_cleanup_idx == total_actors_) // Sentinel to stop cleanup thread
                     return;
 
-            if (actor_pool_[actor_to_cleanup_idx])
+            if (actor_slots_[actor_to_cleanup_idx].actor 
+                && !actor_slots_[actor_to_cleanup_idx].is_valid.load(std::memory_order_acquire))
             {
-                if (actor_pool_[actor_to_cleanup_idx]->recovery_strategy_ == RecoveryMechanism::RESTART )
+                if (actor_slots_[actor_to_cleanup_idx].actor->recovery_strategy_ == RecoveryMechanism::RESTART )
                 {
                     ActorParameters failed_actor_params;
-                    actor_pool_[actor_to_cleanup_idx]->getActorProperties(failed_actor_params);
+                    actor_slots_[actor_to_cleanup_idx].actor->getActorProperties(failed_actor_params);
                     // Since only failed actors come to this path, we have already set actor_alive_ as false
                     unregisterActor(actor_to_cleanup_idx);
 
@@ -493,6 +518,8 @@ public:
     void notifyActorFailure(size_t& actor_id)
     {
         std::unique_lock<std::mutex> cleanup_lock(cleanup_mtx_);
+        /*ACTOR SLOT*/
+        actor_slots_[actor_id].is_valid.store(false,std::memory_order_release);
         binned_actor_idx.push(actor_id);
         cleanup_lock.unlock();
         actors_pending_cleanup_.notify_one();
@@ -515,12 +542,16 @@ public:
     void unregisterActor(int idx)
     {
         std::unique_lock<std::shared_mutex> rlock(registry_lock_);
-        if (actor_pool_[idx])
+
+        if (actor_slots_[idx].actor)
         {
-            actor_pool_[idx]->stopActor();
-            actor_registry_.erase(actor_pool_[idx]->name_);
-            std::cout << "Unregistering actor: " << actor_pool_[idx]->name_ <<  ":  " << actor_pool_[idx].get() <<std::endl;
-            actor_pool_[idx].reset();
+            actor_registry_.erase(actor_slots_[idx].actor->name_);
+            actor_slots_[idx].actor->stopActor();
+            std::cout << "Unregistering actor: " << actor_slots_[idx].actor->name_ <<  ":  " << actor_slots_[idx].actor.get() <<std::endl;
+            //if (!actor_slots_[idx].is_valid.exchange(false))
+                actor_slots_[idx].actor.reset();
+            //else
+            //    std::cout << "Failed to destry actor!" << std::endl;
         }
     }
 

@@ -47,3 +47,5 @@ send() → user always calls through ActorSystem.
 
 Feeling ambitious, changing actors ref from shared ptr to unqiue ptrs
 
+task fails -> actor_alive set to false -> addToMailBox stops pushing new msgs -> drainMailBox stops executing new msgs -> push actor id in cleanup queue -> copy actor parameters and unregister(failed actor) -> in unregister() call , remove entry from actor_registry_ -> Call Actor.reset() -> destructor is called -> destructor calls stopActor() -> stopActor waits for is_draining_ to be false
+
