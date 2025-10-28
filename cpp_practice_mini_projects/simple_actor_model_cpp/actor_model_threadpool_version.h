@@ -284,7 +284,7 @@ public:
     // Destructor
     ~Actor()
     {
-        std::cout << name_ << ": Destrutor Called" << std::endl;
+        //std::cout << name_ << ": Destrutor Called" << std::endl;
 
         ActorState expected = actor_state_.load(std::memory_order_acquire);
         if (expected != ActorState::STOPPED)
@@ -415,7 +415,7 @@ public:
     //void notifyMailboxActive(std::weak_ptr<Actor<Task>> weak_actor)
     void notifyMailboxActive(size_t actor_id)
     {
-        std::cout << "notifyMailboxActive invoked" << std::endl;
+        //std::cout << "notifyMailboxActive invoked" << std::endl;
 
         worker_pool_.tryPush([this,actor_id]() { if (this->actor_slots_[actor_id].actor 
                                                     && this->actor_slots_[actor_id].is_valid.load(std::memory_order_acquire)
@@ -427,7 +427,7 @@ public:
     // Helper function to send msg based on actor name instead of pointers, from sender -> receiver actor
 
     // send() by receiver id
-    bool send(size_t& receiver_id, Message<Task>&& msg)
+    bool send(size_t receiver_id, Message<Task>&& msg)
     {
 
         if (!actor_slots_[receiver_id].is_valid.load(std::memory_order_relaxed))
@@ -446,6 +446,7 @@ public:
     // send() by receiver name
     bool send(const std::string& receiver_name, Message<Task>&& msg)
     {   
+        std::shared_lock<std::shared_mutex> rlock(registry_lock_);
         if (!actor_registry_.contains(receiver_name))
             return false;
         return send(actor_registry_[receiver_name],std::move(msg));
@@ -454,10 +455,11 @@ public:
     // Keeping this api , when I want to send nested tasks, so task wrapping in msg will be on the fly
     bool send(const std::string& sender_name,const std::string& receiver_name, Task&& task,bool needs_ack)
     {   
-
+        std::shared_lock<std::shared_mutex> rlock(registry_lock_);
         auto it = actor_registry_.find(sender_name);
         if ( (it != actor_registry_.end()) && actor_slots_[it->second].actor)
         {
+            rlock.unlock();
             if(actor_slots_[it->second].is_valid.load(std::memory_order_acquire))
                 return actor_slots_[it->second].actor->send(receiver_name,std::move(task),needs_ack);
         }
@@ -467,9 +469,11 @@ public:
     // will be called when ActorSystem wants to send admin tasks to an actor directly
     bool send(const std::string& receiver_name, Task&& task)
     {   
+        std::shared_lock<std::shared_mutex> rlock(registry_lock_);
         auto it = actor_registry_.find(receiver_name);
         if ( (it != actor_registry_.end()) && actor_slots_[it->second].actor)
         {
+            rlock.unlock();
             std::string admin = "";
             if(actor_slots_[it->second].is_valid.load(std::memory_order_acquire))
                 return actor_slots_[it->second].actor->addToMailbox(Message<Task>{std::move(task),admin,false});
@@ -515,7 +519,7 @@ public:
     // If actor throws exception while handling a task, 
     //first we need to stop the actor from accepting new msgs, and then log this failure
     //void notifyActorFailure(std::shared_ptr<Actor<Task>> actor)
-    void notifyActorFailure(size_t& actor_id)
+    void notifyActorFailure(size_t actor_id)
     {
         std::unique_lock<std::mutex> cleanup_lock(cleanup_mtx_);
         /*ACTOR SLOT*/
@@ -541,15 +545,17 @@ public:
     // If actor at given idx exists, remove from the actor_pool_ and destroy the associated actor object
     void unregisterActor(int idx)
     {
-        std::unique_lock<std::shared_mutex> rlock(registry_lock_);
+        std::unique_lock<std::shared_mutex> wrlock(registry_lock_);
 
         if (actor_slots_[idx].actor)
         {
             actor_registry_.erase(actor_slots_[idx].actor->name_);
+            wrlock.unlock();
             actor_slots_[idx].actor->stopActor();
             std::cout << "Unregistering actor: " << actor_slots_[idx].actor->name_ <<  ":  " << actor_slots_[idx].actor.get() <<std::endl;
-            //if (!actor_slots_[idx].is_valid.exchange(false))
-                actor_slots_[idx].actor.reset();
+            
+            actor_slots_[idx].is_valid.store(false,std::memory_order_release);    
+            actor_slots_[idx].actor.reset();
             //else
             //    std::cout << "Failed to destry actor!" << std::endl;
         }

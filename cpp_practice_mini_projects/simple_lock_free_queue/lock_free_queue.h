@@ -86,7 +86,8 @@ public:
         // Check if queue is full
         // Since head can be modified by consumer thread, we would want the consumer to finish updating the head before publishing it to producer(this) 
         // So we will use acquire ordering for head to ensure getting an up-to-date head 
-        if ((next = advance(back)) == head.index.load(std::memory_order_acquire))
+        //if ((next = advance(back)) == head.index.load(std::memory_order_acquire))
+        if ((next = advance(back)) == head.index.load(std::memory_order_relaxed))
         //if ((next = advance(back)) == head.index.load(std::memory_order_seq_cst))
         {
 #ifdef DEBUG
