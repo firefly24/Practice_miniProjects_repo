@@ -56,6 +56,7 @@
 ## 5. Message Flow
 
 > 💡 *Placeholder: Add a sequence diagram here.*
+![alt text](image.png)
 
 Example flow:
 
@@ -121,7 +122,14 @@ Example flow:
 
 ---
 
-## 10. References (Optional)
+## 10. Things making me anxious:
+
+- [ ] I have a working code but I have not sketched down the important code flows 
+- [ ] I don't have any solid diagrams explaining my design 
+- [ ] The directory structure of my project also seems haphazard 
+- [ ] I don't have a written manual and preconditions needed to use my actor system
+
+## 11. References (Optional)
 
 - [Erlang/OTP Design Principles](https://www.erlang.org/doc/design_principles/des_princ)
 - [CAF: C++ Actor Framework](https://actor-framework.org/)
