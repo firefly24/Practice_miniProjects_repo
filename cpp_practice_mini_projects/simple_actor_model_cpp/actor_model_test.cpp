@@ -7,7 +7,8 @@ using Job = std::function<void()> ;
 
 void pingpong(std::string& sender, std::string& receiver,int itr)
 {
-    std::cout << "Ping: " <<itr << std::endl;
+    //std::cout << "Ping: " <<itr << std::endl;
+    ActorModel::Logger::log(ActorModel::Logger::Level::Info,receiver, "Ping!");
     //std::cout <<sender.get() << " -> " << receiver.get()<<std::endl;
     Job getack = [](){std::cout << "Pong" << std::endl; };
     if (itr%5 == 0)
@@ -105,8 +106,8 @@ void testActorSystem()
 int main()
 {
     //std::cout << std::thread::hardware_concurrency() << std::endl;
-    testPingpong();
-    //testMultipleActors();
+    //testPingpong();
+    testMultipleActors();
     //testActorSystem();
     return 0;
 }

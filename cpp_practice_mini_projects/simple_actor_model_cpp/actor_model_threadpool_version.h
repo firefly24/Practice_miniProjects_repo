@@ -1,3 +1,6 @@
+#ifndef ACTOR_MODEL_THREADPOOL_VERSION_H
+#define ACTOR_MODEL_THREADPOOL_VERSION_H
+
 #include <cstddef>
 #include <thread>
 #include <functional>
@@ -5,18 +8,22 @@
 #include <memory>
 #include <vector>
 #include <map>
-#include <iostream>
-#include <mutex>
 #include <shared_mutex>
-#include <chrono>
 #include <condition_variable>
 #include "../simple_mpmc_queue/mpmc_queue_bounded.h"
 #include "../simple_ThreadPool/simple_thread_pool.h"
+#include "actor_model_logger_tracer.h"
+
+using namespace ActorModel;
+using namespace ActorModel::Logger;
+
+using pprof = ActorModel::Profile::Profiler ;
 
 #define NUM_WORKER_THREADS 10
 
 template <typename Task> class Actor;
 template <typename Task> class ActorSystem;
+
 
 enum class ActorState : size_t {
     CREATED,
@@ -104,10 +111,13 @@ template <typename Task>
 struct ActorSlot
 {
     std::atomic<bool> is_valid;
+    std::atomic<uint64_t> gen_id;
     std::unique_ptr<Actor<Task>> actor;
 
+
     ActorSlot(): is_valid{false}, actor(nullptr){}
-    ActorSlot(std::unique_ptr<Actor<Task>> &&actor_): is_valid{true}, actor(std::move(actor_)) {}
+    ActorSlot(std::unique_ptr<Actor<Task>> &&actor_): is_valid{true}, gen_id{0},actor(std::move(actor_)) {}
+
 };
 
 template <typename Task>
@@ -214,7 +224,7 @@ public:
 
     void handleMsg(Message<Task>&& msg)
     {
-        std::cout << name_ << ": "; 
+        //std::cout << name_ << ": "; 
         try
         {
             msg.task();   // Execute task            
@@ -233,7 +243,8 @@ public:
                     actor_system->logFailure(name_,std::move(msg));
                 }
             }
-            std::cout <<name_ << ": Exception caught while draining: " << e.what()<<  std::endl;
+            //std::cout <<name_ << ": Exception caught while draining: " << e.what()<<  std::endl;
+            Logger::log(Level::Error, name_, e.what());
             return;
         }
         //if (msg.request_reply)
@@ -272,7 +283,8 @@ public:
         //if (actor_alive_.exchange(false,std::memory_order_acq_rel) || isFailedState())
         {
             actor_alive_.store(false,std::memory_order_release);
-            std::cout << "Stopping Actor: " << name_ << std::endl;
+            //std::cout << "Stopping Actor: " << name_ << std::endl;
+            Logger::log(Level::Info, name_, "Stopping Actor");
             while(is_draining_.load(std::memory_order_acquire))
             { 
                 std::this_thread::yield();
@@ -324,6 +336,7 @@ private:
     std::queue<size_t> binned_actor_idx;  // cleanup queue storing idx of actors to destroy
     std::thread cleanup_thread_; // Thread that keeps polling to pop from cleanup queue to destroy failed actors
     std::mutex cleanup_mtx_;    // Mutex to control access to cleanup queue
+    //ActorModel::Profile::Profiler pprof;
 
 public:
     ThreadPool_Q worker_pool_;
@@ -332,6 +345,8 @@ public:
                 active_actors_(0), total_actors_(numActors),
                 worker_pool_(numActors*4, NUM_WORKER_THREADS)
     {
+        pprof::instance();
+        pprof::instance().enableTrace();
         actor_slots_ = std::vector<ActorSlot<Task>>(numActors);
         cleanup_thread_ = std::thread([this](){cleanup_actors();});
     }
@@ -345,7 +360,8 @@ public:
         if(actor_slots_[requested_id].actor
             || (actor_registry_.find(requested_name) != actor_registry_.end()))
         {
-            std::cout << "Actor id: " << requested_name << "already holds active actor" << std::endl;
+            //std::cout << "Actor id: " << requested_name << "already holds active actor" << std::endl;
+            Logger::log(Level::Warn, "ActorSystem", requested_name + " is taken"  );
             return false;
         }
         actor_slots_[requested_id].actor = std::make_unique<Actor<Task>>(mailbox_capacity,requested_id,requested_name);
@@ -353,7 +369,11 @@ public:
         actor_slots_[requested_id].actor->setActorSystem(this->shared_from_this());
 
         actor_registry_.emplace(requested_name,requested_id);
-        std::cout<<"Registering Actor: "<<actor_slots_[requested_id].actor->name_<<": "<<actor_slots_[requested_id].actor.get()<<std::endl;
+        //std::cout<<"Registering Actor: "<<actor_slots_[requested_id].actor->name_<<": "<<actor_slots_[requested_id].actor.get()<<std::endl;
+        Logger::log(Level::Info, requested_name, "Successfully registered ");
+        ActorModel::Profile::Event evt{ActorModel::Profile::EventType::Register, requested_id, 1234};
+        pprof::instance().record(evt);
+
         return true;
     }
 
@@ -364,7 +384,8 @@ public:
     {
         if (name == "")
         {
-            std::cout << "Cannot create nameless Actor" << std::endl;
+            //std::cout << "Cannot create nameless Actor" << std::endl;
+            Logger::log(Level::Warn, "ActorSystem", "Cannot create nameless Actor");
             return {};
         }
         while(1)
@@ -377,9 +398,13 @@ public:
             {
                 size_t idx_ = (size_t)idx;
                 if ( registerActor(idx_,name,mailbox_capacity) )
+                {
+
                     return ActorHandle(idx_,actor_slots_[idx_].actor->name_);
+                }
                 
-                std::cout << "Actor creation failed for id: " << idx << std::endl;
+                //std::cout << "Actor creation failed for id: " << idx << std::endl;
+                Logger::log(Level::Warn, "ActorSystem", "Actor creation failed for id: " + to_string(idx));
                 return {};
             }
 
@@ -483,36 +508,37 @@ public:
 
     void cleanup_actors()
     {
-        size_t actor_to_cleanup_idx;
+        size_t cleanup_idx;
 
         while(1)
         {
             std::unique_lock<std::mutex> cleanup_lock(cleanup_mtx_);
             actors_pending_cleanup_.wait(cleanup_lock,[this](){return !binned_actor_idx.empty(); });
             
-            actor_to_cleanup_idx = binned_actor_idx.front();
+            cleanup_idx = binned_actor_idx.front();
             binned_actor_idx.pop();
             cleanup_lock.unlock();
             
-            if ((size_t)actor_to_cleanup_idx == total_actors_) // Sentinel to stop cleanup thread
+            if ((size_t)cleanup_idx == total_actors_) // Sentinel to stop cleanup thread
                     return;
 
-            if (actor_slots_[actor_to_cleanup_idx].actor 
-                && !actor_slots_[actor_to_cleanup_idx].is_valid.load(std::memory_order_acquire))
+            if (actor_slots_[cleanup_idx].actor 
+                && !actor_slots_[cleanup_idx].is_valid.load(std::memory_order_acquire))
             {
-                if (actor_slots_[actor_to_cleanup_idx].actor->recovery_strategy_ == RecoveryMechanism::RESTART )
+                if (actor_slots_[cleanup_idx].actor->recovery_strategy_ == RecoveryMechanism::RESTART )
                 {
                     ActorParameters failed_actor_params;
-                    actor_slots_[actor_to_cleanup_idx].actor->getActorProperties(failed_actor_params);
+                    actor_slots_[cleanup_idx].actor->getActorProperties(failed_actor_params);
                     // Since only failed actors come to this path, we have already set actor_alive_ as false
-                    unregisterActor(actor_to_cleanup_idx);
-
-                    auto renewed_actor = spawn(failed_actor_params.mailbox_size,failed_actor_params.name,actor_to_cleanup_idx);
-                    //registerActor(actor_to_cleanup_idx,failed_actor_params.name,failed_actor_params.mailbox_size );
+                    actor_slots_[cleanup_idx].gen_id.fetch_add(1,std::memory_order_relaxed);
+                    unregisterActor(cleanup_idx);
+                    
+                    auto renewed_actor = spawn(failed_actor_params.mailbox_size,failed_actor_params.name,cleanup_idx);
+                    //registerActor(cleanup_idx,failed_actor_params.name,failed_actor_params.mailbox_size );
                     continue;
                 }
             }
-            unregisterActor(actor_to_cleanup_idx);
+            unregisterActor(cleanup_idx);
         }
     }
 
@@ -532,7 +558,8 @@ public:
     // Just logs the failure if an exception occurs when an actor is executing a task
     void logFailure(const std::string& failed_actor,Message<Task>&& msg)
     {
-        std::cout << "Terminating Actor: "<< failed_actor << " due to execption" << std::endl;
+        //std::cout << "Terminating Actor: "<< failed_actor << " due to execption" << std::endl;
+        Logger::log(Level::Error, failed_actor, "Terminating Actor due to execption " );
         if(msg.request_reply)
         {
             if (!actor_registry_.contains(msg.sender_name))
@@ -552,8 +579,8 @@ public:
             actor_registry_.erase(actor_slots_[idx].actor->name_);
             wrlock.unlock();
             actor_slots_[idx].actor->stopActor();
-            std::cout << "Unregistering actor: " << actor_slots_[idx].actor->name_ <<  ":  " << actor_slots_[idx].actor.get() <<std::endl;
-            
+            //std::cout << "Unregistering actor: " << actor_slots_[idx].actor->name_ <<  ":  " << actor_slots_[idx].actor.get() <<std::endl;
+            Logger::log(Level::Info, actor_slots_[idx].actor->name_, "Unregistering Actor" );
             actor_slots_[idx].is_valid.store(false,std::memory_order_release);    
             actor_slots_[idx].actor.reset();
             //else
@@ -578,3 +605,5 @@ public:
             unregisterActor(i);
     }
 };
+
+#endif /* ACTOR_MODEL_THREADPOOL_VERISON_H */

@@ -1,3 +1,6 @@
+#ifndef MPMC_QUEUE_BOUNDED_H
+#define MPMC_QUEUE_BOUNDED_H
+
 /***
  *  Implementing a simple mpmc queue without mutexes and locks
  */
@@ -246,3 +249,5 @@ public:
     }
 
 };
+
+#endif /* MPMC_QUEUE_BOUNDED_H */
