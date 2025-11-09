@@ -11,8 +11,8 @@ void pingpong(std::string& sender, std::string& receiver,int itr)
     ActorModel::Logger::log(ActorModel::Logger::Level::Info,receiver, "Ping!");
     //std::cout <<sender.get() << " -> " << receiver.get()<<std::endl;
     Job getack = [](){std::cout << "Pong" << std::endl; };
-    if (itr%20 == 0)
-        throw std::runtime_error("Testing a exception flow");
+    //if (itr%20 == 0)
+    //    throw std::runtime_error("Testing a exception flow");
     //receiver->send(sender,std::move(getack));
     
 }
@@ -52,7 +52,7 @@ void testMultipleActors()
         int responder = rand()%max_actors;
         ActorAdmin->send(actor_handles[pinger].name,actor_handles[responder].name,
                         constructTask<Job>(pingpong,actor_handles[pinger].name,actor_handles[responder].name,i),false);
-        std::this_thread::sleep_for(std::chrono::microseconds(50));
+        std::this_thread::sleep_for(std::chrono::microseconds(5));
     }
 
     //std::this_thread::sleep_for(std::chrono::milliseconds(1000));

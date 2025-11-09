@@ -145,7 +145,7 @@ namespace ActorModel
             std::thread flusher_thread;
 
 
-            Profiler(): trace_enabled{false},ring_buf_size{10000},ring_buf{ring_buf_size}
+            Profiler(): trace_enabled{false},ring_buf_size{100000},ring_buf{ring_buf_size}
             {
                 //ring_buf = mpmcQueueBounded<Event>(ring_buf_size);
                 std::filesystem::path logdir = "log";
