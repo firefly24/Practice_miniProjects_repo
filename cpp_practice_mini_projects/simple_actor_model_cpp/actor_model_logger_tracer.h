@@ -82,6 +82,7 @@ namespace ActorModel
             DrainEnd,
             Enqueue,
             Dequeue,
+            StopSystem,
             MaxEvent
         };
 
@@ -105,6 +106,8 @@ namespace ActorModel
                     return "Enqueue";
                 case EventType::Dequeue:
                     return "Dequeue";
+                case EventType::StopSystem:
+                    return "StopSystem";
                 case EventType::MaxEvent:
                     return "INVALID";
             }

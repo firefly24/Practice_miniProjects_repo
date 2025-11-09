@@ -594,6 +594,7 @@ public:
 
     ~ActorSystem()
     {
+        pprof::instance().record(ActorModel::Profile::EventType::StopSystem,0,0, 1234);
         worker_pool_.stopPool();
         if (cleanup_thread_.joinable())
         {

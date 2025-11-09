@@ -27,54 +27,72 @@ def getActorData(evtlog,actorId):
     actor_data = evtlog[evtlog['actor_id'] == actorId]
     return actor_data
 
+def getMailboxPlot(evtlog,actorId):
+    actor_data = evtlog[(evtlog["actor_id"] == actorId)]
+    actor_data_tab= actor_data.groupby(by = ["timestamp","eventType"]).size().rename("count").reset_index().pivot(index = "timestamp", columns = "eventType", values = "count").fillna(0).sort_index().reset_index()
+    
+    if "Enqueue" not in actor_data_tab.columns:
+        actor_data_tab["Enqueue"] = 0
+    if "Dequeue" not in actor_data_tab.columns:
+        actor_data_tab["Dequeue"] = 0
+    return actor_data_tab
+
 #draw a basic plot of stats per actor
-def plotActorData(evtlog,actor_id):
-    # I will configure the profiler plots here
-    print(f"Plotting for actor_id {actor_id}")
-    actor_log = getMailboxPlot(evtlog,actor_id)
+def plotActorData(evtlog,actor_ids):
 
-    #Create new columns for mailbox data
-    actor_log["Enqueue_sum"] = actor_log["Enqueue"].cumsum()
-    actor_log["Dequeue_sum"] = actor_log["Dequeue"].cumsum()
-    actor_log["mailbox_content"] = actor_log["Enqueue_sum"] - actor_log["Dequeue_sum"]
-    assert (actor_log["mailbox_content"] >= 0).all(), "there is a bug! Dequeues > Enqueues should not happen!"
+    num_actors = len(actor_ids)
 
-    #plot enqueue, dequeue, mailbox contents, and restart events for the actor
-    #use timestamp as int64 for plotting, as it is easier to visualize per ms changes
-    fig,ax = plt.subplots(figsize = (10,6))
-    ax.plot(actor_log["timestamp"],actor_log["Enqueue"], label = "Enqueue", marker = 'o',ls = "")
-    ax.plot(actor_log["timestamp"],actor_log["Dequeue"], label = "Dequeue", marker = 'x',ls = "")
-    ax.plot(actor_log["timestamp"],actor_log["mailbox_content"], label = "mailbox", marker = '+')
+    fig,ax = plt.subplots(num_actors,1,figsize = (15,(5*num_actors)),sharex=True)
+    plot_row = 0
+    stoptime = evtlog[evtlog["eventType"] == "StopSystem"]["timestamp"].reset_index(drop = True)
+    print(stoptime[0])
 
-    #mark restart events on the plot
-    if "Restart" in actor_log.columns:
-        for idx,row in actor_log.iterrows():
-            if row["Restart"] == 1.0:
-                ax.axvline(x= row["timestamp"],color = "magenta",alpha = 0.3)
+    for actor_id in actor_ids:
+        # I will configure the profiler plots here
+        print(f"Plotting for actor_id {actor_id}")
+        actor_log = getMailboxPlot(evtlog,actor_id)
+
+        #Create new columns for mailbox data
+        actor_log["Enqueue_sum"] = actor_log["Enqueue"].cumsum()
+        actor_log["Dequeue_sum"] = actor_log["Dequeue"].cumsum()
+        actor_log["mailbox_content"] = actor_log["Enqueue_sum"] - actor_log["Dequeue_sum"]
+        assert (actor_log["mailbox_content"] >= 0).all(), "there is a bug! Dequeues > Enqueues should not happen!"
+
+        #plot enqueue, dequeue, mailbox contents, and restart events for the actor
+        #use timestamp as int64 for plotting, as it is easier to visualize per ms changes
+        
+        ax[plot_row].step(actor_log["timestamp"],actor_log["Enqueue"], label = "Enqueue", marker = 'o',color='g')
+        ax[plot_row].step(actor_log["timestamp"],actor_log["Dequeue"], label = "Dequeue", marker = 'x',ls = "",color = 'r')
+        ax[plot_row].step(actor_log["timestamp"],actor_log["mailbox_content"], label = "mailbox")
+        ax[plot_row].axvline(x = stoptime[0], color = 'm', linewidth = 2 )
+
+        #mark restart events on the plot
+        if "Restart" in actor_log.columns:
+            restart_lines = actor_log[actor_log["Restart"] >0]["timestamp"]
+            for xr in restart_lines:
+                    ax[plot_row].axvline(x= xr ,color = "magenta",alpha = 0.1, linewidth = 1)
+
+
+
+        ax[plot_row].set_title(f"Mailbox stats for Actor: {actor_id} ")
+        ax[plot_row].ticklabel_format(axis = 'x', style = 'plain')
+        plot_row+=1
 
     plt.xlabel("Timestamp in ms")
     plt.ylabel("Events per ms/Mailbox depth")
-
-    plt.title(f"Mailbox stats for Actor: {actor_id} ")
-
-    print(actor_log)
     plt.legend()
+    plt.savefig("myProfileStats.png",dpi = 300)
     plt.show()
 
 def getMaxActors(evtlog):
-    return evtlog["actor_id"].max() +1
+    return evtlog["actor_id"].max()+1
 
 def summaryByEvent(evtlog):
     return evtlog.groupby(by=["actor_id","eventType"]).size().rename("count").reset_index().pivot(index = "actor_id", columns = "eventType", values = "count")
 
-def getMailboxPlot(evtlog,actorId):
-    actor_data = evtlog[(evtlog["actor_id"] == actorId)]
-    actor_data_tab= actor_data.groupby(by = ["timestamp","eventType"]).size().rename("count").reset_index().pivot(index = "timestamp", columns = "eventType", values = "count").fillna(0).sort_index().reset_index()
-    return actor_data_tab
-
 #Main function
 print("This program")
-evtlog = parse_csv("./log/actor_trace_1762673233742.csv")
+evtlog = parse_csv("./log/actor_trace_1762698661164.csv")
 
 # get idea of what the data looks like 
 print(evtlog.head())
@@ -83,6 +101,7 @@ print(evtlog.head())
 print(summaryByEvent(evtlog))
 print()
 print()
+max_actors = getMaxActors(evtlog)
 #print(getMailboxPlot(evtlog,0))
-plotActorData(evtlog,5)
+plotActorData(evtlog,[i for i in range(0,max_actors)])
 
