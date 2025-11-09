@@ -149,9 +149,11 @@ public:
     std::string name_; //Have an actor name, to get pretty logs!
     RecoveryMechanism recovery_strategy_;   // Add recovery strategy if actor stops
     std::atomic<bool> is_draining_;
+    std::atomic<uint64_t> gen_id_;
 
-    explicit Actor(size_t mailbox_size, size_t id,std::string name="")
-        :mailbox_size_(mailbox_size),mailbox_count_(0),actor_alive_(true),actor_state_(ActorState::CREATED),id_(id),name_(name),is_draining_(false)
+    explicit Actor(size_t mailbox_size, size_t id,std::string name="",uint64_t gen_id=0)
+        :mailbox_size_(mailbox_size),mailbox_count_(0),actor_alive_(true),actor_state_(ActorState::CREATED),
+        id_(id),name_(name),is_draining_(false), gen_id_(gen_id)
     {
         recovery_strategy_ = RecoveryMechanism::RESTART;
         mailbox_q = std::make_unique<mpmcQueueBounded<Message<Task>>>(mailbox_size);
@@ -191,17 +193,20 @@ public:
     // Push a task to this actor's mailbox
     bool addToMailbox(Message<Task>&& msg)
     {
-        size_t retry_loop=0;
+        //size_t retry_loop=0;
         //once actor is stopped, but some thread keeps pushing successfully back to back, we won't enter while loop
         if (!actor_alive_.load(std::memory_order_acquire))
             return false;
 
-        while (!mailbox_q->try_push(std::move(msg)) )
+        if (!mailbox_q->try_push(std::move(msg)) )
         {
-            if ((++retry_loop > 10) )
-                return false;
-            std::this_thread::yield();
+            //if ((++retry_loop > 10) )
+            //std::this_thread::yield();
+            pprof::instance().record(ActorModel::Profile::EventType::Fail,id_,gen_id_, 1234);
+            return false;
+
         }
+        pprof::instance().record(ActorModel::Profile::EventType::Enqueue,id_,gen_id_, 1234);
 
         bool expected_draining = false;
         if (is_draining_.compare_exchange_strong(expected_draining,true,std::memory_order_acq_rel))
@@ -227,6 +232,7 @@ public:
         //std::cout << name_ << ": "; 
         try
         {
+            pprof::instance().record(ActorModel::Profile::EventType::Dequeue,id_,gen_id_, 1234);
             msg.task();   // Execute task            
         }
         catch(const std::exception& e)
@@ -255,16 +261,14 @@ public:
     void drainMailbox()
     {
         // Flush out all tasks remaining in the queue by executing them
+        pprof::instance().record(ActorModel::Profile::EventType::DrainStart,id_,gen_id_, 1234);
         Message<Task> remaining_msg;
         while(actor_alive_.load(std::memory_order_acquire) && mailbox_q->try_pop(remaining_msg))
             handleMsg(std::move(remaining_msg));
 
         is_draining_.store(false,std::memory_order_release);
 
-        if (!actor_alive_.load(std::memory_order_acquire))
-            return;
-
-        if (mailbox_q->try_pop(remaining_msg))
+        if ((actor_alive_.load(std::memory_order_acquire)) && mailbox_q->try_pop(remaining_msg))
         {
             bool expected_draining = false;
             if (is_draining_.compare_exchange_strong(expected_draining,true))
@@ -272,6 +276,7 @@ public:
                     actor_system->notifyMailboxActive(id_);
             handleMsg(std::move(remaining_msg));
         }
+        pprof::instance().record(ActorModel::Profile::EventType::DrainEnd,id_,gen_id_, 1234);
 
         // Some msgs might get queued just before the exit, but for fairness I don't want to keep draining
         // So the new msgs will stay idle in the actor mailbox till they are picked up my a worker thread again
@@ -336,7 +341,6 @@ private:
     std::queue<size_t> binned_actor_idx;  // cleanup queue storing idx of actors to destroy
     std::thread cleanup_thread_; // Thread that keeps polling to pop from cleanup queue to destroy failed actors
     std::mutex cleanup_mtx_;    // Mutex to control access to cleanup queue
-    //ActorModel::Profile::Profiler pprof;
 
 public:
     ThreadPool_Q worker_pool_;
@@ -364,15 +368,14 @@ public:
             Logger::log(Level::Warn, "ActorSystem", requested_name + " is taken"  );
             return false;
         }
-        actor_slots_[requested_id].actor = std::make_unique<Actor<Task>>(mailbox_capacity,requested_id,requested_name);
+        actor_slots_[requested_id].actor = std::make_unique<Actor<Task>>(mailbox_capacity,requested_id,requested_name,actor_slots_[requested_id].gen_id);
         actor_slots_[requested_id].is_valid.store(true,std::memory_order_release);
         actor_slots_[requested_id].actor->setActorSystem(this->shared_from_this());
 
         actor_registry_.emplace(requested_name,requested_id);
-        //std::cout<<"Registering Actor: "<<actor_slots_[requested_id].actor->name_<<": "<<actor_slots_[requested_id].actor.get()<<std::endl;
+
         Logger::log(Level::Info, requested_name, "Successfully registered ");
-        ActorModel::Profile::Event evt{ActorModel::Profile::EventType::Register, requested_id, 1234};
-        pprof::instance().record(evt);
+        pprof::instance().record(ActorModel::Profile::EventType::Register, requested_id,actor_slots_[requested_id].gen_id, 1234);
 
         return true;
     }
@@ -534,7 +537,7 @@ public:
                     unregisterActor(cleanup_idx);
                     
                     auto renewed_actor = spawn(failed_actor_params.mailbox_size,failed_actor_params.name,cleanup_idx);
-                    //registerActor(cleanup_idx,failed_actor_params.name,failed_actor_params.mailbox_size );
+                    pprof::instance().record(ActorModel::Profile::EventType::Restart, cleanup_idx,actor_slots_[cleanup_idx].gen_id,1234);
                     continue;
                 }
             }
@@ -581,6 +584,7 @@ public:
             actor_slots_[idx].actor->stopActor();
             //std::cout << "Unregistering actor: " << actor_slots_[idx].actor->name_ <<  ":  " << actor_slots_[idx].actor.get() <<std::endl;
             Logger::log(Level::Info, actor_slots_[idx].actor->name_, "Unregistering Actor" );
+            pprof::instance().record(ActorModel::Profile::EventType::Unregister,idx,actor_slots_[idx].gen_id, 1234);
             actor_slots_[idx].is_valid.store(false,std::memory_order_release);    
             actor_slots_[idx].actor.reset();
             //else

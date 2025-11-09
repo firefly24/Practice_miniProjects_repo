@@ -11,7 +11,7 @@ void pingpong(std::string& sender, std::string& receiver,int itr)
     ActorModel::Logger::log(ActorModel::Logger::Level::Info,receiver, "Ping!");
     //std::cout <<sender.get() << " -> " << receiver.get()<<std::endl;
     Job getack = [](){std::cout << "Pong" << std::endl; };
-    if (itr%5 == 0)
+    if (itr%20 == 0)
         throw std::runtime_error("Testing a exception flow");
     //receiver->send(sender,std::move(getack));
     
@@ -27,7 +27,7 @@ void testPingpong()
     for(int i=0;i<10;i++)
     {
         ActorAdmin->send(pinger.name,responder.name,constructTask<Job>(pingpong,pinger.name,responder.name,i+1),false);
-        std::this_thread::sleep_for(std::chrono::microseconds(50));
+        //std::this_thread::sleep_for(std::chrono::microseconds(5));
     }
     //pinger->sendMsg(responder,constructTask<Job>(pingpong,pinger,responder));
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
@@ -37,7 +37,7 @@ void testPingpong()
 
 void testMultipleActors()
 {
-    int max_actors = 300;
+    int max_actors = 10;
     std::shared_ptr<ActorSystem<Job>> ActorAdmin = std::make_shared<ActorSystem<Job>>(max_actors);
     std::vector<ActorHandle> actor_handles;
 
@@ -48,14 +48,14 @@ void testMultipleActors()
 
     for(int i=0;i<10000;i++)
     {
-        int pinger = rand()%300;
-        int responder = rand()%300;
+        int pinger = rand()%max_actors;
+        int responder = rand()%max_actors;
         ActorAdmin->send(actor_handles[pinger].name,actor_handles[responder].name,
                         constructTask<Job>(pingpong,actor_handles[pinger].name,actor_handles[responder].name,i),false);
         std::this_thread::sleep_for(std::chrono::microseconds(50));
     }
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(10000));
+    //std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 }
 
 /*

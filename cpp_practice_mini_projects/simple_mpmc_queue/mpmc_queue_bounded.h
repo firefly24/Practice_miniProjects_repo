@@ -117,14 +117,17 @@ public:
                 continue;
             }
             if (idx < tail)
+            {
                 return false; // Slot not freed by consumer yet
+            }
             
             count++;
-            if (count > 16)
+            if (count > 5)
             {
-                count = 0;
                 std::this_thread::yield();  // seems this thread keeps spinning trying to reserve a slot,so we yield temporarily
-            }   
+            }
+            if(count > 16)
+                return false;
         }
     }
 

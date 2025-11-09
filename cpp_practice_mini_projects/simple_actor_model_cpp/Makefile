@@ -26,4 +26,4 @@ release: $(SRC)
 
 # Cleanup
 clean:
-	rm -f $(TARGET)_debug $(TARGET)_asan $(TARGET)_tsan $(TARGET)_release
+	rm -f $(TARGET)_debug $(TARGET)_asan $(TARGET)_tsan $(TARGET)_release ./log/*
