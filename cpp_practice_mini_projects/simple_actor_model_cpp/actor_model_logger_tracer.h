@@ -64,6 +64,8 @@ namespace ActorModel
 
             oss << std::put_time(&tstamp,"%F %T") << " [" << level_to_str(level) << "]\t" << component << ": " << log_msg << "\n";
 
+            //oss << now << " [" << level_to_str(level) << "]\t" << component << ": " << log_msg << "\n";
+
             std::lock_guard<std::mutex> log_lock(log_mtx());
             std::cout << oss.str();
         }
@@ -83,6 +85,8 @@ namespace ActorModel
             Enqueue,
             Dequeue,
             StopSystem,
+            PoolEnqueue,
+            PoolDequeue,
             MaxEvent
         };
 
@@ -108,6 +112,10 @@ namespace ActorModel
                     return "Dequeue";
                 case EventType::StopSystem:
                     return "StopSystem";
+                case EventType::PoolEnqueue:
+                    return "PoolEnqueue";
+                case EventType::PoolDequeue:
+                    return "PoolDequeue";
                 case EventType::MaxEvent:
                     return "INVALID";
             }
@@ -152,7 +160,7 @@ namespace ActorModel
                 try{
                     std::filesystem::create_directory(logdir);
                 }
-                catch(exception e)
+                catch(std::exception e)
                 {
                     Logger::log(Logger::Level::Error, "Profiler",e.what());
                 }
@@ -169,7 +177,7 @@ namespace ActorModel
                 while(Profile::Profiler::instance().trace_enabled.load(std::memory_order_acquire))
                 {
                     dump_to_csv();
-                    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
                 }
             }
 

@@ -49,3 +49,17 @@ Feeling ambitious, changing actors ref from shared ptr to unqiue ptrs
 
 task fails -> actor_alive set to false -> addToMailBox stops pushing new msgs -> drainMailBox stops executing new msgs -> push actor id in cleanup queue -> copy actor parameters and unregister(failed actor) -> in unregister() call , remove entry from actor_registry_ -> Call Actor.reset() -> destructor is called -> destructor calls stopActor() -> stopActor waits for is_draining_ to be false
 
+
+15/11/2025
+I was able to build a small visualizer about the mailbox activity of each actor into matplotlib. 
+I observed a variable slump/stall window in the activity of the overall actor system, where all actors show no activity at the same time during the 12-50 ms stall window.
+I observed it on only some of the runs, so repro rate is not 100%
+
+I assumed the stall was due to the threadpool task queue being full, but when I also tracked the threadpool task queue size, I don't see it being full (Last plot on the profiler graph).
+![issue image](myProfileStats_buggy2.png)
+
+Now I suspect the stall might be due to either the locks/condition_variables used in threadpool queue, or the registy_lock_ I am using in send.
+(Need to move to lock-free queue in threapool implementation, and change the send API in actor model to remove registry_lock dependency and see if issue still persists.)
+
+I don't plan to tackle this soon, and would rather sleep on it for now as these are big changes. I want to spend some time at this moment to just try to get my profiler graphs more prettier to get a mood boost.
+

@@ -203,6 +203,12 @@ public:
             //if ((++retry_loop > 10) )
             //std::this_thread::yield();
             pprof::instance().record(ActorModel::Profile::EventType::Fail,id_,gen_id_, 1234);
+            
+            //try_push may fail due to mailbox full, trigger a drain in that case
+            bool expected_draining = false;
+            if (is_draining_.compare_exchange_strong(expected_draining,true,std::memory_order_acq_rel))
+                if (auto actor_system = owning_system_.lock())
+                    actor_system->notifyMailboxActive(id_);
             return false;
 
         }
@@ -445,11 +451,16 @@ public:
     {
         //std::cout << "notifyMailboxActive invoked" << std::endl;
 
-        worker_pool_.tryPush([this,actor_id]() { if (this->actor_slots_[actor_id].actor 
+        bool push_done = worker_pool_.tryPush([this,actor_id]() { if (this->actor_slots_[actor_id].actor 
                                                     && this->actor_slots_[actor_id].is_valid.load(std::memory_order_acquire)
                                                     )
                                                         this->actor_slots_[actor_id].actor->drainMailbox();
                                             });
+
+        // Log failure for threadpool push fail                                
+        if (!push_done)
+            pprof::instance().record(ActorModel::Profile::EventType::Fail, actor_id,actor_slots_[actor_id].gen_id,1234);
+                                            
     }
 
     // Helper function to send msg based on actor name instead of pointers, from sender -> receiver actor

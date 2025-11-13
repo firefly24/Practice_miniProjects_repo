@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import sys, csv, math
+import argparse
 from collections import defaultdict, deque
 from datetime import datetime
 import matplotlib.pyplot as plt
@@ -42,7 +43,7 @@ def plotActorData(evtlog,actor_ids):
 
     num_actors = len(actor_ids)
 
-    fig,ax = plt.subplots(num_actors,1,figsize = (15,(5*num_actors)),sharex=True)
+    fig,ax = plt.subplots(num_actors+1,1,figsize = (15,(5*num_actors)),sharex=True)
     plot_row = 0
     stoptime = evtlog[evtlog["eventType"] == "StopSystem"]["timestamp"].reset_index(drop = True)
     print(stoptime[0])
@@ -78,11 +79,42 @@ def plotActorData(evtlog,actor_ids):
         ax[plot_row].ticklabel_format(axis = 'x', style = 'plain')
         plot_row+=1
 
+    # Plot threadpool queue stats
+    pool_stats = evtlog[(evtlog["eventType"] == "PoolEnqueue") | (evtlog["eventType"] == "PoolDequeue")].groupby(by=["eventType","timestamp"]).size().rename("count").reset_index()
+    pool_stats = pool_stats.pivot( index = "timestamp", columns = "eventType", values = "count" ).reset_index()
+    pool_stats["PoolEnqueue_sum"] = pool_stats["PoolEnqueue"].cumsum()
+    pool_stats["PoolDequeue_sum"] = pool_stats["PoolDequeue"].cumsum()
+    pool_stats["Pool_depth"] = pool_stats["PoolEnqueue_sum"] - pool_stats["PoolDequeue_sum"]
+
+
+    ax[plot_row].step(pool_stats["timestamp"],pool_stats["PoolEnqueue"], label = "Enqueue", marker = 'o',color='g')
+    ax[plot_row].step(pool_stats["timestamp"],pool_stats["PoolDequeue"], label = "Dequeue", marker = 'x',ls = "",color = 'r')
+    #ax[plot_row].step(pool_stats["timestamp"],pool_stats["Pool_depth"], label = "mailbox")
+    ax[plot_row].axvline(x = stoptime[0], color = 'm', linewidth = 2 )
+    
+
+    #Experimental
+    pool_stats_fail = evtlog[(evtlog["eventType"] == "PoolEnqueue") | (evtlog["eventType"] == "PoolDequeue")].drop(["actor_id","gen_id","thread_id","ts"],axis=1).reset_index(drop="True")
+    pool_stats_fail["pool_depth"] = 0
+    pdepth = 0
+
+    for idx,row in pool_stats_fail.iterrows():
+        if row["eventType"] == "PoolEnqueue":
+            pdepth+=1
+        else:
+            pdepth-=1
+        pool_stats_fail.at[idx,"pool_depth"] = pdepth
+    
+    ax[plot_row].step(pool_stats_fail["timestamp"],pool_stats_fail["pool_depth"], label = "mailbox")
+
+    print(pool_stats_fail)
+
     plt.xlabel("Timestamp in ms")
     plt.ylabel("Events per ms/Mailbox depth")
     plt.legend()
     plt.savefig("myProfileStats.png",dpi = 300)
     plt.show()
+
 
 def getMaxActors(evtlog):
     return evtlog["actor_id"].max()+1
@@ -92,7 +124,12 @@ def summaryByEvent(evtlog):
 
 #Main function
 print("This program")
-evtlog = parse_csv("./log/actor_trace_1762698661164.csv")
+
+parser = argparse.ArgumentParser("Parsing cmd line arguments")
+parser.add_argument("logpath", type=str,help = "Name of log file in ./log directory")
+args = parser.parse_args()
+
+evtlog = parse_csv(f"{args.logpath}")
 
 # get idea of what the data looks like 
 print(evtlog.head())
