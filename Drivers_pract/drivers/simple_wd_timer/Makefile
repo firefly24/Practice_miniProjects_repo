@@ -1,4 +1,6 @@
-obj-m := sw_wd_timer_mod.o
+obj-m := simple_wd_timer.o
+
+simple_wd_timer-objs := src/sw_wd_timer_mod.o
 
 #QEMU kernel build source code dir
 qemu_kdir := $(HOME)/EmbAI/sys_mastery/qmuk_kernel/linux
