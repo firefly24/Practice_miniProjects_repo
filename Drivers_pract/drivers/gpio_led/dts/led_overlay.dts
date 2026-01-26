@@ -1,0 +1,23 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+
+	compatible = "linux,dt-overlay";
+
+	fragment@0 {
+		target-path = "/pl061@9030000";
+
+		__overlay__ {
+			
+			led0: led0 {
+				compatible = "practice,gpio_led";
+				label = "blinker-led";
+				gpios = <0 5 0>;
+				status = "okay";
+			};
+		};
+
+	};
+
+};
