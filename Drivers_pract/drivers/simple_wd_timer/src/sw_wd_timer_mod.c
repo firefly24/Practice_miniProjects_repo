@@ -28,7 +28,7 @@ struct sw_wd_timer{
 	unsigned long last_pet_jiffies;
 
 	atomic_t ping_count;
-	atomic_t is_active;
+	atomic_t armed;
 
 	dev_t device_number;
 	struct cdev sw_wd_cdev;
@@ -45,10 +45,12 @@ static void sw_wd_timer_ping(struct sw_wd_timer *swd)
 	if (IS_ERR_OR_NULL(swd))
 		return;
 	
-	if(!atomic_read(&swd->is_active))
+	if(!atomic_read(&swd->armed))
 		return;	
 		
 	atomic_add(1,&swd->ping_count);
+	
+	// Assuming single instance watchdog, no other concurrent writes 
 	swd->last_pet_jiffies = jiffies;
 	
 	mod_timer(&swd->timer_work,jiffies +  swd->timeout_jiffies);
@@ -58,18 +60,18 @@ static void sw_wd_timer_work_func(struct timer_list *t)
 {
 	struct sw_wd_timer *swd = container_of(t,struct sw_wd_timer,timer_work);
 	
-	pr_info("%s:\t SW Watchdog interrupt fired, last pet time: %lu, time elapsed: %u\n",
-		__func__,
+	pr_info("%s:\t SW Watchdog interrupt fired, total pings:%d, last pet time: %lu, time elapsed: %u\n",
+		__func__, atomic_read(&swd->ping_count),
 		swd->last_pet_jiffies,
 		jiffies_to_msecs(jiffies - swd->last_pet_jiffies));  
 	
-	if (!atomic_read(&swd->is_active))
+	if (!atomic_read(&swd->armed))
 		return;
 	
 	panic("SW watchdog expired!");
 }
 
-static void sw_wd_timer_start(struct sw_wd_timer *swd)
+static void sw_wd_timer_arm(struct sw_wd_timer *swd)
 {
 	if(IS_ERR_OR_NULL(swd))
 		return;
@@ -78,19 +80,17 @@ static void sw_wd_timer_start(struct sw_wd_timer *swd)
 	atomic_set(&swd->ping_count,0);
 	swd->last_pet_jiffies = jiffies;
 	swd->timeout_jiffies = msecs_to_jiffies(WD_DEFAULT_TIMEOUT_MS);
-
-	timer_setup(&swd->timer_work, sw_wd_timer_work_func,0);
 	
-	atomic_set(&swd->is_active,1);
+	atomic_set(&swd->armed,1);
 	
 	mod_timer(&swd->timer_work, jiffies + swd->timeout_jiffies);	
 	
 	pr_info("%s:\t Watchdog timer enabled, timeout: %lu\n",__func__, swd->timeout_jiffies);
 }
 
-static void sw_wd_timer_stop(struct sw_wd_timer *swd)
+static void sw_wd_timer_disarm(struct sw_wd_timer *swd)
 {
-	atomic_set(&swd->is_active,0);
+	atomic_set(&swd->armed,0);
 	
 	timer_delete_sync(&swd->timer_work);
 	
@@ -100,7 +100,7 @@ static void sw_wd_timer_stop(struct sw_wd_timer *swd)
 
 static int sw_wd_open(struct inode* filenode, struct file* dev_file)
 {
-	sw_wd_timer_start(&wd);
+	sw_wd_timer_arm(&wd);
 	return 0;
 }
 
@@ -110,12 +110,15 @@ static ssize_t sw_wd_write(struct file* dev_file,
 			   loff_t* offset)
 {
 	sw_wd_timer_ping(&wd);
+	
+	// Ignoring actual payload, as right now the payload value is of no concern
+	// A user process writing into the file itself indicates alive-ness, treating it as a ping
 	return input_length;
 }
 
 static int sw_wd_release(struct inode* filenode, struct file* dev_file)
 {
-	sw_wd_timer_stop(&wd);
+	sw_wd_timer_disarm(&wd);
 	return 0;
 }
 
@@ -126,15 +129,16 @@ static const struct file_operations sw_wd_fops =  {
 	.release = sw_wd_release, 
 };
 
-
-
 static int __init sw_wd_timer_init(void)
 {
 	int ret=0;
 	
+	// setup timer first
+	timer_setup(&wd.timer_work, sw_wd_timer_work_func,0);
+	
 	// create a device number for our character device
 	if( (ret = alloc_chrdev_region(&wd.device_number,0,1, "simple_wd_timer") ) )
-		return ret;
+		goto del_timer;
 	
 	// initialize a cdev object for char device registration with vfs	
 	cdev_init(&wd.sw_wd_cdev,&sw_wd_fops);
@@ -142,10 +146,7 @@ static int __init sw_wd_timer_init(void)
 	
 	// add char device to system to make it live
 	if ((ret = cdev_add(&wd.sw_wd_cdev,wd.device_number,1)) )
-	{
-		unregister_chrdev_region(wd.device_number,1);
-		return ret;
-	}
+		goto unreg_chrdev;
 	
 	//create device files
 	
@@ -153,25 +154,40 @@ static int __init sw_wd_timer_init(void)
 	wd.sw_wd_class = class_create("simple_wd_timer");
 	if (IS_ERR_OR_NULL(wd.sw_wd_class))
 	{
-		// return error
+		ret = PTR_ERR(wd.sw_wd_class);
+		goto del_cdev;
 	}
 	
 	//create device file under this class
 	wd.wd_device = device_create(wd.sw_wd_class,NULL,wd.device_number,NULL,"sw_wdog");
+	if (IS_ERR(wd.wd_device))
+	{
+		ret = PTR_ERR(wd.wd_device);
+		goto del_class;
+	}
 	
 	pr_info("%s:\t Software watchdog module loaded succesfully\n",__func__);
 	pr_info("%s:\t Device number(<major>:<minor>): [%d:%d] \n",__func__,
 								 MAJOR(wd.device_number),
 								 MINOR(wd.device_number) );
+								 
+	return ret;
+	
+	//device_destroy(wd.sw_wd_class, wd.device_number);
+del_class:	
+	class_destroy(wd.sw_wd_class);
+del_cdev:
+	cdev_del(&wd.sw_wd_cdev);
+unreg_chrdev:
+	unregister_chrdev_region(wd.device_number,1);
+del_timer:	
+	timer_shutdown_sync(&wd.timer_work);
 	
 	return ret;
 }
 
 static void __exit sw_wd_timer_exit(void)
 {	
-	sw_wd_timer_stop(&wd);
-
-	timer_shutdown_sync(&wd.timer_work);
 	
 	device_destroy(wd.sw_wd_class, wd.device_number);
 	
@@ -180,6 +196,9 @@ static void __exit sw_wd_timer_exit(void)
 	cdev_del(&wd.sw_wd_cdev);
 	
 	unregister_chrdev_region(wd.device_number,1);
+	
+	// before timer teardown, make sure char device is destroyed so that userspace cannot issue new pings during timer teardoen
+	sw_wd_timer_disarm(&wd);
 
 	pr_info("%s:\t Successfully removed sw watchdog module\n",__func__);
 }
@@ -187,12 +206,4 @@ static void __exit sw_wd_timer_exit(void)
 
 module_init(sw_wd_timer_init);
 module_exit(sw_wd_timer_exit);
-
-
-
-
-
-
-
-
 
