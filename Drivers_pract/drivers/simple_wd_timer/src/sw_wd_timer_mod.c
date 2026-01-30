@@ -14,9 +14,15 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Darshana");
 MODULE_DESCRIPTION("Simple watchdog timer practice");
 
+static bool nowayout = false;
+MODULE_PARAM(nowayout,bool, 0644);
+MODULE_PARAM_DESC(nowayout,"Watchdog cannot be terminated once it is started");
+
 #define WD_DEFAULT_TIMEOUT_MS 5000
 
 // TODO: pr_fmt customization
+
+
 
 struct sw_wd_timer{
 
@@ -118,6 +124,10 @@ static ssize_t sw_wd_write(struct file* dev_file,
 
 static int sw_wd_release(struct inode* filenode, struct file* dev_file)
 {
+	// does nowayout affect module unload? How about the user prog comes to end successfully
+	if (nowayout)
+		return;
+		
 	sw_wd_timer_disarm(&wd);
 	return 0;
 }
@@ -181,7 +191,7 @@ del_cdev:
 unreg_chrdev:
 	unregister_chrdev_region(wd.device_number,1);
 del_timer:	
-	timer_shutdown_sync(&wd.timer_work);
+	timer_delete_sync(&wd.timer_work);
 	
 	return ret;
 }
