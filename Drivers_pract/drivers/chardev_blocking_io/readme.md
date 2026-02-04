@@ -111,14 +111,18 @@ This implies:
 			- when to write
 			- Orchestration
 	
-	  This design:
-		  - cannot lose wakeups
-		  - tolerates spurious wakeups
-		  - respects scheduler fairness
-		  - preserves liveness
-		  - respects userspace policy
-    
-- survives teardown
+	This design:
+		- cannot lose wakeups
+		- tolerates spurious wakeups
+		- respects scheduler fairness
+		- preserves liveness
+		- respects userspace policy
+		- survives teardown
+		
+	Concurrency handling:
+		- condition(truth) should be lock protected
+		- wakeups are hints, state is authority
+		- liveness > micro-optimizations
 
 
 ## Layer 3: Invariants
@@ -222,3 +226,21 @@ These rules must always hold, if any of these is violated ,then the driver is in
 	3. producer-consumer co-ordination
 	4. broadcast wakeups
 	5. scheduler runqueue vs waitqueue
+	
+	
+## Updates:
+
+#### 04/02/2025:
+	Implemented minimal blocking read and write on a char device.
+ 
+	Thoughts:
+	Since actual data transfer support is not added here, doesn't this module look analogous to synchronization primitives like condition_variables, semaphores, futex ? But this resides in kernel/device boundary rather than shared userspace memory.
+ 
+	Can this be changed to behave as a barrier mechanism, by adding a global reader count per device file perhaps, and using a threshold count to issue wakeup_all by writer? Maybe this counting machanism can be added in open/close fileops calls rather than read/writes.  
+
+
+
+
+
+	
+
