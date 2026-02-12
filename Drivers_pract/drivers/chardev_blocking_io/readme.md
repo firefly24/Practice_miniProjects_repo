@@ -227,7 +227,7 @@ These rules must always hold, if any of these is violated ,then the driver is in
 	4. broadcast wakeups
 	5. scheduler runqueue vs waitqueue
 	
-	
+---	
 ## Updates:
 
 #### 04/02/2025:
@@ -238,8 +238,46 @@ These rules must always hold, if any of these is violated ,then the driver is in
  
 	Can this be changed to behave as a barrier mechanism, by adding a global reader count per device file perhaps, and using a threshold count to issue wakeup_all by writer? Maybe this counting machanism can be added in open/close fileops calls rather than read/writes.  
 
+---
+#### 12/02/2025
 
+## Poll callback
 
+What problem does poll() solve ? - Poll is a readiness probe, it tells if user tries I/O now, will progress be possible ?
+- Does not sleep inside the driver
+- Does not transfer/ manipulate data
+- only answers about readiness
+
+### poll() lifecycle
+
+When userspace calls a poll(), there is a polling framework inside the kernel which manages polling, which is responsible for calling our driver's poll() callback.
+So what are the responsibilities of our driver callback  and kernel polling framework ? 
+#### Polling framework responsibilities:
+- sleeping
+- rechecking
+- timeouts
+- signal handling
+- multiplexing across many fds
+
+#### Driver callback responsibilities:
+- The readiness condition
+- the waitqueue head where framework can wait on 
+- correct synchronization 
+
+So whenever a poll() is called by userspace, it is the responsibility of the kernel polling framework to do the sleeping when I/O is not possible, waking up the driver to recheck readiness if I/O is possible by calling driver's poll() callback. 
+So our driver's poll can be called by the framework many times to check readiness, and it should only check and return the readiness, and not sleep or perform looping of any kind. 
+
+	1. Userspace calls poll()
+	2. kernel calls driver's .poll() callback
+	3. Inside .poll():
+		- we register our waitqueue using poll_wait()
+		- compute readiness value
+		- return the readiness value
+	4. Framework:
+		- if readiness value != 0 , return to userspace
+		- is readiness value == 0, sleep
+
+---
 
 
 	

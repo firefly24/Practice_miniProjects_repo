@@ -8,6 +8,7 @@
 #include <linux/uaccess.h>
 #include <linux/wait.h>
 #include <linux/spinlock.h>
+#include <linux/poll.h>
 
 
 MODULE_LICENSE("GPL");
@@ -44,6 +45,28 @@ static int chrdev_blk_io_release(struct inode *filenode, struct file *dev_file)
 	return 0;
 }
 
+static __poll_t chrdev_blk_io_poll(struct file *dev_file, struct poll_table_struct *polltable)
+{
+	__poll_t status =0;
+	
+	// register waitqueue for sleeping
+	poll_wait(dev_file,&dev.wq,polltable);
+	
+	// check state
+	spin_lock(&dev.state_lock);
+	
+	if (dev.terminating)
+		status |= POLLERR;
+		
+	if (dev.data_available)
+		status |= POLLIN | POLLRDNORM;  // check poll() syscall manpage for these bits
+	
+	spin_unlock(&dev.state_lock);
+	
+	return status;
+
+}
+
 static ssize_t chrdev_blk_io_read(struct file *dev_file, 
 				  char __user *usr_buf, 
 				  size_t data_size, 
@@ -75,6 +98,14 @@ static ssize_t chrdev_blk_io_read(struct file *dev_file,
 			return data_size;
 		}
 		
+		// For non-blocking I/O do not loop waiting for data 
+		if (dev_file->f_flags & O_NONBLOCK)
+		{
+			spin_unlock(&dev.state_lock);
+			return -EAGAIN;
+		}
+		
+		
 		spin_unlock(&dev.state_lock);
 		
 		// Sleep process again till state may have changed
@@ -84,8 +115,7 @@ static ssize_t chrdev_blk_io_read(struct file *dev_file,
 		{
 			pr_info("Read interrupted by a signal\n");
 			return ret;
-		}
-		
+		}	
 		
 	}
 	return data_size;
@@ -123,6 +153,7 @@ static const struct file_operations chrdev_blk_io_fops = {
 	.release = chrdev_blk_io_release ,
 	.read = chrdev_blk_io_read,
 	.write = chrdev_blk_io_write,
+	.poll = chrdev_blk_io_poll,
 };
 
 
