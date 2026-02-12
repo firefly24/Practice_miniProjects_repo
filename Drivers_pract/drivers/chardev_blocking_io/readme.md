@@ -277,6 +277,12 @@ So our driver's poll can be called by the framework many times to check readines
 		- if readiness value != 0 , return to userspace
 		- is readiness value == 0, sleep
 
+
+	Invariant 1: `poll()` must not change driver state.
+	Invariant 2: `poll()` must observe readiness using same logic as `read()`.
+	Invariant 3: Wakeups are hints, not guarantees.
+	Invariant 4: Readiness is level-triggered unless explicitly designed otherwise.
+
 ---
 
 
