@@ -15,8 +15,8 @@ MODULE_AUTHOR("Darshana");
 MODULE_DESCRIPTION("Simple watchdog timer practice");
 
 static bool nowayout = false;
-MODULE_PARAM(nowayout,bool, 0644);
-MODULE_PARAM_DESC(nowayout,"Watchdog cannot be terminated once it is started");
+module_param(nowayout,bool, 0644);
+MODULE_PARM_DESC(nowayout,"Watchdog cannot be terminated once it is started");
 
 #define WD_DEFAULT_TIMEOUT_MS 5000
 
@@ -33,14 +33,16 @@ struct sw_wd_timer{
 	unsigned long timeout_jiffies;
 	unsigned long last_pet_jiffies;
 
+	// watchog state tracking	
 	atomic_t ping_count;
 	atomic_t armed;
+	atomic_t owner_count;
 
+	// attributes for watchdog char device file 
 	dev_t device_number;
 	struct cdev sw_wd_cdev;
 	struct class *sw_wd_class;
 	struct device* wd_device;
-	
 };
 
 // writing the module for one instance only for now
@@ -66,9 +68,9 @@ static void sw_wd_timer_work_func(struct timer_list *t)
 {
 	struct sw_wd_timer *swd = container_of(t,struct sw_wd_timer,timer_work);
 	
-	pr_info("%s:\t SW Watchdog interrupt fired, total pings:%d, last pet time: %lu, time elapsed: %u\n",
+	pr_info("%s:\t SW Watchdog interrupt fired, total pings:%d, last pet time: %u, time elapsed: %u\n",
 		__func__, atomic_read(&swd->ping_count),
-		swd->last_pet_jiffies,
+		jiffies_to_msecs(swd->last_pet_jiffies),
 		jiffies_to_msecs(jiffies - swd->last_pet_jiffies));  
 	
 	if (!atomic_read(&swd->armed))
@@ -91,7 +93,7 @@ static void sw_wd_timer_arm(struct sw_wd_timer *swd)
 	
 	mod_timer(&swd->timer_work, jiffies + swd->timeout_jiffies);	
 	
-	pr_info("%s:\t Watchdog timer enabled, timeout: %lu\n",__func__, swd->timeout_jiffies);
+	pr_info("%s:\t Watchdog timer enabled, timeout: %u\n",__func__, jiffies_to_msecs(swd->timeout_jiffies));
 }
 
 static void sw_wd_timer_disarm(struct sw_wd_timer *swd)
@@ -100,12 +102,18 @@ static void sw_wd_timer_disarm(struct sw_wd_timer *swd)
 	
 	timer_delete_sync(&swd->timer_work);
 	
-	pr_info("%s:\t Watchdog timer disabled, timeout: %lu\n",__func__, swd->timeout_jiffies);
+	pr_info("%s:\t Watchdog timer disabled, timeout: %u\n",__func__, jiffies_to_msecs(swd->timeout_jiffies));
 }
 
 
 static int sw_wd_open(struct inode* filenode, struct file* dev_file)
 {
+	
+	if (atomic_cmpxchg(&wd.owner_count,0,1) != 0)
+	{
+		// previous owner_count was non-zero, so reject open
+		return -EBUSY;
+	}
 	sw_wd_timer_arm(&wd);
 	return 0;
 }
@@ -115,6 +123,11 @@ static ssize_t sw_wd_write(struct file* dev_file,
 			   size_t input_length, 
 			   loff_t* offset)
 {
+
+	// check for ownership
+	if (atomic_read(&wd.owner_count) != 1)
+		return -EPERM;
+		
 	sw_wd_timer_ping(&wd);
 	
 	// Ignoring actual payload, as right now the payload value is of no concern
@@ -122,13 +135,43 @@ static ssize_t sw_wd_write(struct file* dev_file,
 	return input_length;
 }
 
+static ssize_t sw_wd_status_read(struct file* dev_file,
+				 char __user *user_buf,
+				 size_t data_size,
+				 loff_t* offset)
+{
+
+	char status_buf[128];
+	int len;
+
+	// only allow first read to be successful, as cat /dev/sw_wdog will keep reading in loop and cause panic on timeout
+	if (*offset !=0)
+		return 0;
+	
+	len = scnprintf(status_buf, sizeof(status_buf)," Owner: %d, Armed: %d, Ping count: %d, Last pet time: %u\n",
+				 atomic_read(&wd.owner_count),
+				 atomic_read(&wd.armed),
+				 atomic_read(&wd.ping_count),
+				 jiffies_to_msecs(wd.last_pet_jiffies) );
+				 
+	if (copy_to_user(user_buf, status_buf, len ))
+		return -EFAULT;	
+	
+	*offset += len;
+	return len;
+}
+				
+
 static int sw_wd_release(struct inode* filenode, struct file* dev_file)
 {
 	// does nowayout affect module unload? How about the user prog comes to end successfully
 	if (nowayout)
-		return;
+		return 0;
 		
 	sw_wd_timer_disarm(&wd);
+	
+	// release ownership
+	atomic_set(&wd.owner_count,0);
 	return 0;
 }
 
@@ -136,6 +179,7 @@ static const struct file_operations sw_wd_fops =  {
 	.owner = THIS_MODULE ,
 	.open = sw_wd_open,
 	.write = sw_wd_write,
+	.read = sw_wd_status_read,
 	.release = sw_wd_release, 
 };
 
