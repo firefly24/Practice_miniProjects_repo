@@ -9,6 +9,7 @@
 #include <linux/uaccess.h>
 #include <linux/device.h>
 #include <linux/kdev_t.h>
+#include <linux/compiler.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Darshana");
@@ -20,6 +21,24 @@ MODULE_PARM_DESC(nowayout,"Watchdog cannot be terminated once it is started");
 
 #define WD_DEFAULT_TIMEOUT_MS 5000
 #define MAX_WDOGS 4
+
+struct wd_status{
+	bool is_owned;
+	bool is_armed;
+	int timeout_ms;
+	int ping_count;
+	unsigned long time_since_last_pet_ms;
+};
+
+
+// ioctl related definitions
+#define WD_MAGIC 'W'
+#define WD_ARM _IO(WD_MAGIC,1)
+#define WD_DISARM _IO(WD_MAGIC,2)
+#define WD_SET_TIMEOUT _IOW(WD_MAGIC,3,int)
+#define WD_GET_STATUS _IOR(WD_MAGIC,4,struct wd_status)
+
+
 // TODO: pr_fmt customization
 
 struct sw_wd_timer{
@@ -41,21 +60,27 @@ struct sw_wd_timer{
 	struct file *owner;
 };
 
+
 static dev_t wdog_base_dev;
 static struct cdev wdog_base_cdev;
 static struct class *wdog_base_class;
 static struct sw_wd_timer wdog_instance[MAX_WDOGS];
 
-static void sw_wd_timer_ping(struct sw_wd_timer *swd)
+static int sw_wd_timer_ping(struct sw_wd_timer *swd)
 {	
 	if(!atomic_read(&swd->armed))
-		return;	
+	{
+		pr_warn("Watchdog pinged while disarmed! \n");
+		return -EINVAL;	
+	}
 		
 	atomic_inc(&swd->ping_count);
 	
-	swd->last_pet_jiffies = jiffies;
+	WRITE_ONCE(swd->last_pet_jiffies,jiffies);
 	
 	mod_timer(&swd->timer_work,jiffies +  swd->timeout_jiffies);
+	
+	return 0;
 }
 
 /*This timer callback will run in softIRQ context*/
@@ -78,8 +103,9 @@ static void sw_wd_timer_arm(struct sw_wd_timer *swd)
 {		
 	// Fill out software watchdog properties
 	atomic_set(&swd->ping_count,0);
-	swd->last_pet_jiffies = jiffies;
-	swd->timeout_jiffies = msecs_to_jiffies(WD_DEFAULT_TIMEOUT_MS);
+	//swd->last_pet_jiffies = jiffies;
+	
+	// make sure to set custom timeout period through ioctl before arming wdog
 	
 	atomic_set(&swd->armed,1);
 	
@@ -90,6 +116,7 @@ static void sw_wd_timer_arm(struct sw_wd_timer *swd)
 
 static void sw_wd_timer_disarm(struct sw_wd_timer *swd)
 {
+	// TODO: since we're moving arm/disarm logic to ioctl, handle nowayout semantics here too
 	atomic_set(&swd->armed,0);
 	
 	timer_delete_sync(&swd->timer_work);
@@ -119,7 +146,7 @@ static int sw_wd_open(struct inode* filenode, struct file* dev_file)
 	spin_unlock(&wd->owner_lock);
 	
 	dev_file->private_data = wd;
-	sw_wd_timer_arm(wd);
+	//sw_wd_timer_arm(wd);
 	return 0;
 }
 
@@ -138,7 +165,8 @@ static ssize_t sw_wd_write(struct file* dev_file,
 		return -EPERM;
 	}	
 	spin_unlock(&wd->owner_lock);
-	sw_wd_timer_ping(wd);
+	if (sw_wd_timer_ping(wd))
+		return -EINVAL;
 	
 	// Ignoring actual payload, as right now the payload value is of no concern
 	// A user process writing into the file itself indicates alive-ness, treating it as a ping
@@ -195,12 +223,67 @@ static int sw_wd_release(struct inode* filenode, struct file* dev_file)
 	return 0;
 }
 
+static long sw_wd_ioctl(struct file *dev_file, unsigned int cmd, unsigned long arg)
+{
+	struct sw_wd_timer *wd  = dev_file->private_data;
+	
+	spin_lock(&wd->owner_lock);
+	if ((wd->owner != dev_file) && (cmd != WD_SET_TIMEOUT))
+	{
+		spin_unlock(&wd->owner_lock);
+		return -EPERM;
+	}
+	spin_unlock(&wd->owner_lock);
+	
+	switch(cmd)
+	{
+	case WD_ARM:
+		sw_wd_timer_arm(wd);
+		break;
+	case WD_DISARM:
+		if (!nowayout)
+			sw_wd_timer_disarm(wd);
+		break;
+	case WD_SET_TIMEOUT:
+	{
+		int timeout;
+		if (copy_from_user(&timeout,(int __user *)arg,sizeof(timeout)) )
+			return -EFAULT;
+			
+		timeout = (timeout<=0)?WD_DEFAULT_TIMEOUT_MS:timeout;
+		WRITE_ONCE(wd->timeout_jiffies,msecs_to_jiffies(timeout));
+		
+		break;
+	}
+	case WD_GET_STATUS:
+	{
+		struct wd_status status;
+		status.is_armed = atomic_read(&wd->armed);
+		status.is_owned = (wd->owner != NULL);
+		status.ping_count = atomic_read(&wd->ping_count);
+		status.timeout_ms = jiffies_to_msecs(READ_ONCE(wd->timeout_jiffies));
+		status.time_since_last_pet_ms = (!status.is_armed)?0
+						:jiffies_to_msecs(jiffies - READ_ONCE(wd->last_pet_jiffies) );
+		
+		if (copy_to_user((struct wd_status __user*)arg,&status, sizeof(struct wd_status)) )
+			return -EFAULT;
+		
+		break;
+	}
+	default:
+		return -EINVAL;
+	}
+	
+	return 0;
+}
+
 static const struct file_operations sw_wd_fops =  {
 	.owner = THIS_MODULE ,
 	.open = sw_wd_open,
 	.write = sw_wd_write,
 	.read = sw_wd_status_read,
-	.release = sw_wd_release, 
+	.release = sw_wd_release,
+	.unlocked_ioctl = sw_wd_ioctl,
 };
 
 static int __init sw_wd_timer_init(void)
@@ -219,9 +302,11 @@ static int __init sw_wd_timer_init(void)
 		spin_lock_init(&wd->owner_lock);
 	
 		// setup timer first
+		wd->timeout_jiffies = msecs_to_jiffies(WD_DEFAULT_TIMEOUT_MS);
 		timer_setup(&wd->timer_work, sw_wd_timer_work_func,0);
 		atomic_set(&wd->armed,0);
 		atomic_set(&wd->ping_count,0);
+		
 	}
 	
 	// initialize a cdev object for char device registration with vfs	

@@ -174,6 +174,8 @@ Ownership count
  - platform devices vs dynamically created char devices
  - char device file operations
  - user-kernel communication
+ - ioctl interface
+ - status check for debugging
 
 
 ### Important points to note: 
