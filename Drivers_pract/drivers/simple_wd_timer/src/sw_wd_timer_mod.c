@@ -10,6 +10,7 @@
 #include <linux/device.h>
 #include <linux/kdev_t.h>
 #include <linux/compiler.h>
+#include <linux/delay.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Darshana");
@@ -20,7 +21,15 @@ module_param(nowayout,bool, 0644);
 MODULE_PARM_DESC(nowayout,"Watchdog cannot be terminated once it is started");
 
 #define WD_DEFAULT_TIMEOUT_MS 5000
+#define WD_PANIC_DELAY_DEFAULT_MS 2000
 #define MAX_WDOGS 4
+
+enum wd_recovery_policy{
+	WD_POLICY_PANIC=0,
+	WD_POLICY_LOG_ONLY,
+	WD_POLICY_DELAYED_PANIC,
+	WD_POLICY_MAX,
+};
 
 struct wd_status{
 	bool is_owned;
@@ -37,6 +46,8 @@ struct wd_status{
 #define WD_DISARM _IO(WD_MAGIC,2)
 #define WD_SET_TIMEOUT _IOW(WD_MAGIC,3,int)
 #define WD_GET_STATUS _IOR(WD_MAGIC,4,struct wd_status)
+#define WD_SET_RECOVERY_POLICY _IOW(WD_MAGIC,5,enum wd_recovery_policy)
+#define WD_SET_PANIC_DELAY_MS _IOW(WD_MAGIC,6,int)
 
 
 // TODO: pr_fmt customization
@@ -58,6 +69,14 @@ struct sw_wd_timer{
 	// attributes to enforce exclusive ownership
 	spinlock_t owner_lock;
 	struct file *owner;
+	
+	// RECOVERY policy related
+	enum wd_recovery_policy recovery_policy;
+	struct delayed_work panic_work;
+	unsigned int panic_delay_ms;
+	struct work_struct recovery_work;
+	
+	atomic_t expired;
 };
 
 
@@ -83,20 +102,52 @@ static int sw_wd_timer_ping(struct sw_wd_timer *swd)
 	return 0;
 }
 
+static void sw_wd_timer_trigger_panic(struct work_struct* work)
+{
+	panic("SW watchdog expired!");
+}
+
 /*This timer callback will run in softIRQ context*/
-static void sw_wd_timer_work_func(struct timer_list *t)
+static void sw_wd_timer_handle_expire(struct timer_list *t)
 {
 	struct sw_wd_timer *swd = container_of(t,struct sw_wd_timer,timer_work);
+	
+	if (!atomic_read(&swd->armed))
+		return;
+		
+	atomic_set(&swd->expired,1);
+		
+	pr_warn("SW watchdog expired!\n");
+	
+	schedule_work(&(swd->recovery_work));
+}
+
+static void sw_wd_timer_handle_recovery(struct work_struct *work)
+{
+	struct sw_wd_timer *swd = container_of(work,struct sw_wd_timer, recovery_work);
+	
+	if (!atomic_read(&swd->armed))
+		return;	
 	
 	pr_info("%s:\t SW Watchdog interrupt fired, total pings:%d, last pet time: %u, time elapsed: %u\n",
 		__func__, atomic_read(&swd->ping_count),
 		jiffies_to_msecs(swd->last_pet_jiffies),
 		jiffies_to_msecs(jiffies - swd->last_pet_jiffies));  
 	
-	if (!atomic_read(&swd->armed))
-		return;
-	
-	panic("SW watchdog expired!");
+	switch(swd->recovery_policy)
+	{
+		
+	case WD_POLICY_LOG_ONLY:
+		break;
+	case WD_POLICY_DELAYED_PANIC:
+		schedule_delayed_work(&swd->panic_work,msecs_to_jiffies(swd->panic_delay_ms));
+		break;
+	case WD_POLICY_PANIC:
+		sw_wd_timer_trigger_panic(NULL);
+		break;
+	default:
+		break;
+	}
 }
 
 static void sw_wd_timer_arm(struct sw_wd_timer *swd)
@@ -107,6 +158,7 @@ static void sw_wd_timer_arm(struct sw_wd_timer *swd)
 	
 	// make sure to set custom timeout period through ioctl before arming wdog
 	
+	atomic_set(&swd->expired,0);
 	atomic_set(&swd->armed,1);
 	
 	mod_timer(&swd->timer_work, jiffies + swd->timeout_jiffies);	
@@ -120,6 +172,8 @@ static void sw_wd_timer_disarm(struct sw_wd_timer *swd)
 	atomic_set(&swd->armed,0);
 	
 	timer_delete_sync(&swd->timer_work);
+	cancel_work_sync(&swd->recovery_work);
+	cancel_delayed_work_sync(&swd->panic_work);
 	
 	pr_info("%s:\t Watchdog timer disabled, timeout: %u\n",__func__, jiffies_to_msecs(swd->timeout_jiffies));
 }
@@ -218,6 +272,7 @@ static int sw_wd_release(struct inode* filenode, struct file* dev_file)
 	spin_unlock(&wd->owner_lock);	
 	
 	// does nowayout affect module unload? How about the user prog comes to end successfully
+	//TODO: remove disarm here and only handle through ioctl ? 
 	if (!nowayout)
 		sw_wd_timer_disarm(wd);
 	return 0;
@@ -270,6 +325,28 @@ static long sw_wd_ioctl(struct file *dev_file, unsigned int cmd, unsigned long a
 		
 		break;
 	}
+	case WD_SET_RECOVERY_POLICY:
+	{
+		if (atomic_read(&wd->armed))
+			return -EBUSY;
+		enum wd_recovery_policy policy;
+		
+		if (copy_from_user(&policy,(int __user *)arg,sizeof(policy)) )
+			return -EFAULT; 
+		if (policy <0 || policy >= WD_POLICY_MAX)
+			return -EINVAL;
+		wd->recovery_policy  = policy;
+		break;
+	}
+	case WD_SET_PANIC_DELAY_MS:
+	{
+		int delay_time;
+		
+		if (copy_from_user(&delay_time, (int __user *)arg, sizeof(delay_time)))
+			return -EFAULT;
+		wd->panic_delay_ms = delay_time;
+		break;
+	}
 	default:
 		return -EINVAL;
 	}
@@ -303,10 +380,15 @@ static int __init sw_wd_timer_init(void)
 	
 		// setup timer first
 		wd->timeout_jiffies = msecs_to_jiffies(WD_DEFAULT_TIMEOUT_MS);
-		timer_setup(&wd->timer_work, sw_wd_timer_work_func,0);
+		timer_setup(&wd->timer_work, sw_wd_timer_handle_expire,0);
 		atomic_set(&wd->armed,0);
 		atomic_set(&wd->ping_count,0);
+		atomic_set(&wd->expired,0);
 		
+		wd->panic_delay_ms = WD_PANIC_DELAY_DEFAULT_MS;
+		wd->recovery_policy = WD_POLICY_LOG_ONLY;
+		INIT_WORK(&(wd->recovery_work), sw_wd_timer_handle_recovery );
+		INIT_DELAYED_WORK(&(wd->panic_work),sw_wd_timer_trigger_panic);
 	}
 	
 	// initialize a cdev object for char device registration with vfs	
