@@ -53,7 +53,7 @@ struct wd_status{
 // TODO: pr_fmt customization
 
 struct sw_wd_timer{
-	struct timer_list timer_work;
+	struct timer_list detect_expiry;
 	
 	unsigned long timeout_jiffies;
 	unsigned long last_pet_jiffies;
@@ -85,22 +85,11 @@ static struct cdev wdog_base_cdev;
 static struct class *wdog_base_class;
 static struct sw_wd_timer wdog_instance[MAX_WDOGS];
 
-static int sw_wd_timer_ping(struct sw_wd_timer *swd)
-{	
-	if(!atomic_read(&swd->armed))
-	{
-		pr_warn("Watchdog pinged while disarmed! \n");
-		return -EINVAL;	
-	}
-		
-	atomic_inc(&swd->ping_count);
-	
-	WRITE_ONCE(swd->last_pet_jiffies,jiffies);
-	
-	mod_timer(&swd->timer_work,jiffies +  swd->timeout_jiffies);
-	
-	return 0;
-}
+
+
+/*******************************************************************************************************/
+/*******************---WATCHDOG HELPER FUNCTIONS----****************************************************/
+/*******************************************************************************************************/
 
 static void sw_wd_timer_trigger_panic(struct work_struct* work)
 {
@@ -110,15 +99,18 @@ static void sw_wd_timer_trigger_panic(struct work_struct* work)
 /*This timer callback will run in softIRQ context*/
 static void sw_wd_timer_handle_expire(struct timer_list *t)
 {
-	struct sw_wd_timer *swd = container_of(t,struct sw_wd_timer,timer_work);
+	struct sw_wd_timer *swd = container_of(t,struct sw_wd_timer,detect_expiry);
 	
+	// Don't trigger expiry if already disarmed
 	if (!atomic_read(&swd->armed))
 		return;
-		
-	atomic_set(&swd->expired,1);
-		
-	pr_warn("SW watchdog expired!\n");
 	
+	// Don't trigger recovery again if already expired
+	if (atomic_xchg(&swd->expired,1))
+		return;
+
+	atomic_set(&swd->armed,0);
+	pr_warn("SW watchdog expired!\n");
 	schedule_work(&(swd->recovery_work));
 }
 
@@ -126,8 +118,9 @@ static void sw_wd_timer_handle_recovery(struct work_struct *work)
 {
 	struct sw_wd_timer *swd = container_of(work,struct sw_wd_timer, recovery_work);
 	
-	if (!atomic_read(&swd->armed))
-		return;	
+	// Do not trigger recovery if watchdog is already rearmed for next use
+	if (!atomic_read(&swd->expired))
+		return;
 	
 	pr_info("%s:\t SW Watchdog interrupt fired, total pings:%d, last pet time: %u, time elapsed: %u\n",
 		__func__, atomic_read(&swd->ping_count),
@@ -136,32 +129,61 @@ static void sw_wd_timer_handle_recovery(struct work_struct *work)
 	
 	switch(swd->recovery_policy)
 	{
-		
 	case WD_POLICY_LOG_ONLY:
 		break;
 	case WD_POLICY_DELAYED_PANIC:
 		schedule_delayed_work(&swd->panic_work,msecs_to_jiffies(swd->panic_delay_ms));
 		break;
 	case WD_POLICY_PANIC:
-		sw_wd_timer_trigger_panic(NULL);
+		schedule_delayed_work(&swd->panic_work,0);
 		break;
 	default:
 		break;
 	}
 }
 
+static int sw_wd_timer_ping(struct sw_wd_timer *swd)
+{	
+	if(!atomic_read(&swd->armed))
+	{
+		pr_warn("Watchdog pinged while disarmed! \n");
+		return -EINVAL;	
+	}
+	/*
+	if (atomic_read(&swd->expired))
+	{
+		pr_warn("Watchdog pinged while expired! \n");
+		return -EIO;	
+	}
+	*/	
+	atomic_inc(&swd->ping_count);
+	WRITE_ONCE(swd->last_pet_jiffies,jiffies);
+	mod_timer(&swd->detect_expiry,jiffies +  swd->timeout_jiffies);
+	
+	return 0;
+}
+
+static void sw_wd_reset_lifecycle(struct sw_wd_timer *swd)
+{
+	//cancel pending work
+	timer_delete_sync(&swd->detect_expiry);
+	cancel_work_sync(&swd->recovery_work);
+	cancel_delayed_work_sync(&swd->panic_work);
+	
+	//reset stats
+	atomic_set(&swd->ping_count,0);
+	WRITE_ONCE(swd->last_pet_jiffies,jiffies);
+	atomic_set(&swd->expired,0);
+}
+
 static void sw_wd_timer_arm(struct sw_wd_timer *swd)
 {		
-	// Fill out software watchdog properties
-	atomic_set(&swd->ping_count,0);
-	//swd->last_pet_jiffies = jiffies;
+	// reset wdog lifecycle 
+	sw_wd_reset_lifecycle(swd);
 	
-	// make sure to set custom timeout period through ioctl before arming wdog
-	
-	atomic_set(&swd->expired,0);
+	// arm wdog after resetting lifecycle and set timer
 	atomic_set(&swd->armed,1);
-	
-	mod_timer(&swd->timer_work, jiffies + swd->timeout_jiffies);	
+	mod_timer(&swd->detect_expiry, jiffies + swd->timeout_jiffies);	
 	
 	pr_info("%s:\t Watchdog timer enabled, timeout: %u\n",__func__, jiffies_to_msecs(swd->timeout_jiffies));
 }
@@ -169,15 +191,24 @@ static void sw_wd_timer_arm(struct sw_wd_timer *swd)
 static void sw_wd_timer_disarm(struct sw_wd_timer *swd)
 {
 	// TODO: since we're moving arm/disarm logic to ioctl, handle nowayout semantics here too
+	
+	if (nowayout)
+		return;
+	
 	atomic_set(&swd->armed,0);
 	
-	timer_delete_sync(&swd->timer_work);
+	timer_delete_sync(&swd->detect_expiry);
 	cancel_work_sync(&swd->recovery_work);
 	cancel_delayed_work_sync(&swd->panic_work);
 	
 	pr_info("%s:\t Watchdog timer disabled, timeout: %u\n",__func__, jiffies_to_msecs(swd->timeout_jiffies));
 }
 
+
+
+/*******************************************************************************************************/
+/*******************----WATCHDOG DEVICE FILE OPS----****************************************************/
+/*******************************************************************************************************/
 
 static int sw_wd_open(struct inode* filenode, struct file* dev_file)
 {
@@ -197,10 +228,10 @@ static int sw_wd_open(struct inode* filenode, struct file* dev_file)
 	}
 	
 	wd->owner = dev_file;
-	spin_unlock(&wd->owner_lock);
-	
 	dev_file->private_data = wd;
-	//sw_wd_timer_arm(wd);
+	spin_unlock(&wd->owner_lock);	
+	
+
 	return 0;
 }
 
@@ -213,14 +244,15 @@ static ssize_t sw_wd_write(struct file* dev_file,
 	
 	// check for ownership
 	spin_lock(&wd->owner_lock);
-	if(wd->owner != dev_file)
-	{
-		spin_unlock(&wd->owner_lock);
-		return -EPERM;
-	}	
+	bool is_owner  = (wd->owner == dev_file);
 	spin_unlock(&wd->owner_lock);
-	if (sw_wd_timer_ping(wd))
-		return -EINVAL;
+	
+	if(!is_owner)
+		return -EPERM;
+	
+	int ret = 0;	
+	if ((ret = sw_wd_timer_ping(wd)))
+		return ret;
 	
 	// Ignoring actual payload, as right now the payload value is of no concern
 	// A user process writing into the file itself indicates alive-ness, treating it as a ping
@@ -240,12 +272,17 @@ static ssize_t sw_wd_status_read(struct file* dev_file,
 	// only allow first read to be successful, as cat /dev/sw_wdog will keep reading in loop and cause panic on timeout
 	if (*offset !=0)
 		return 0;
+		
+	spin_lock(&wd->owner_lock);
+	bool is_owned = (wd->owner != NULL);
+	spin_unlock(&wd->owner_lock);
 	
-	len = scnprintf(status_buf, sizeof(status_buf)," Owned: %s, Armed: %d, Ping count: %d, Last pet time: %u\n",
-				 (wd->owner==NULL)?"No":"Yes",
+	len = scnprintf(status_buf, sizeof(status_buf)," Owned: %s, Armed: %d, Ping count: %d, Last pet time: %u, Expired: %d\n",
+				 (!is_owned)?"No":"Yes",
 				 atomic_read(&wd->armed),
 				 atomic_read(&wd->ping_count),
-				 jiffies_to_msecs(wd->last_pet_jiffies) );
+				 jiffies_to_msecs(wd->last_pet_jiffies),
+				 atomic_read(&wd->expired) );
 				 
 	if (copy_to_user(user_buf, status_buf, len ))
 		return -EFAULT;	
@@ -271,10 +308,11 @@ static int sw_wd_release(struct inode* filenode, struct file* dev_file)
 		wd->owner = NULL;
 	spin_unlock(&wd->owner_lock);	
 	
-	// does nowayout affect module unload? How about the user prog comes to end successfully
-	//TODO: remove disarm here and only handle through ioctl ? 
+	/* does nowayout affect module unload? How about the user prog comes to end successfully
+	TODO: remove disarm here and only handle through ioctl ? 
 	if (!nowayout)
 		sw_wd_timer_disarm(wd);
+	*/
 	return 0;
 }
 
@@ -283,16 +321,17 @@ static long sw_wd_ioctl(struct file *dev_file, unsigned int cmd, unsigned long a
 	struct sw_wd_timer *wd  = dev_file->private_data;
 	
 	spin_lock(&wd->owner_lock);
-	if ((wd->owner != dev_file) && (cmd != WD_SET_TIMEOUT))
-	{
-		spin_unlock(&wd->owner_lock);
-		return -EPERM;
-	}
+	bool is_permitted_owner = ((wd->owner == dev_file) || (cmd == WD_GET_STATUS));
 	spin_unlock(&wd->owner_lock);
+	
+	if (!is_permitted_owner)
+		return -EPERM;
 	
 	switch(cmd)
 	{
 	case WD_ARM:
+		if (atomic_read(&wd->armed) && !atomic_read(&wd->expired))
+			return -EBUSY;
 		sw_wd_timer_arm(wd);
 		break;
 	case WD_DISARM:
@@ -340,6 +379,8 @@ static long sw_wd_ioctl(struct file *dev_file, unsigned int cmd, unsigned long a
 	}
 	case WD_SET_PANIC_DELAY_MS:
 	{
+		if (atomic_read(&wd->armed))
+			return -EBUSY;
 		int delay_time;
 		
 		if (copy_from_user(&delay_time, (int __user *)arg, sizeof(delay_time)))
@@ -363,6 +404,12 @@ static const struct file_operations sw_wd_fops =  {
 	.unlocked_ioctl = sw_wd_ioctl,
 };
 
+
+
+/*******************************************************************************************************/
+/*******************----WATCHDOG MODULE INIT/EXIT---****************************************************/
+/*******************************************************************************************************/
+
 static int __init sw_wd_timer_init(void)
 {
 	int ret=0;
@@ -380,7 +427,8 @@ static int __init sw_wd_timer_init(void)
 	
 		// setup timer first
 		wd->timeout_jiffies = msecs_to_jiffies(WD_DEFAULT_TIMEOUT_MS);
-		timer_setup(&wd->timer_work, sw_wd_timer_handle_expire,0);
+		WRITE_ONCE(wd->last_pet_jiffies,jiffies);
+		timer_setup(&wd->detect_expiry, sw_wd_timer_handle_expire,0);
 		atomic_set(&wd->armed,0);
 		atomic_set(&wd->ping_count,0);
 		atomic_set(&wd->expired,0);
@@ -421,6 +469,7 @@ static int __init sw_wd_timer_init(void)
 		if (IS_ERR(wd->wd_device))
 		{
 			ret = PTR_ERR(wd->wd_device);
+			pr_err("%s:\t Failed to create device for minor no.: %d",__func__, minor);
 			goto del_device;
 		}
 		success_device_count++;
@@ -443,8 +492,12 @@ del_cdev:
 	cdev_del(&wdog_base_cdev);
 
 unreg_chrdev:
-	for (int i=0;i<success_device_count;i++)
-		timer_delete_sync(&wdog_instance[i].timer_work);
+	for (int i=0;i<MAX_WDOGS;i++)
+	{
+		timer_delete_sync(&wdog_instance[i].detect_expiry);
+		cancel_work_sync(&wdog_instance[i].recovery_work);
+		cancel_delayed_work_sync(&wdog_instance[i].panic_work);
+	}
 	unregister_chrdev_region(wdog_base_dev,MAX_WDOGS);
 	
 	return ret;
@@ -454,15 +507,15 @@ static void __exit sw_wd_timer_exit(void)
 {	
 	
 	for (int minor = 0;minor<MAX_WDOGS; minor++)
+	{
+		sw_wd_timer_disarm(&wdog_instance[minor]);
 		device_destroy(wdog_base_class, wdog_instance[minor].device_number);
+	}
 	
 	class_destroy(wdog_base_class);
 	
 	cdev_del(&wdog_base_cdev);
-	
-	for (int minor = 0;minor<MAX_WDOGS; minor++)
-		sw_wd_timer_disarm(&wdog_instance[minor]);
-	
+		
 	unregister_chrdev_region(wdog_base_dev,MAX_WDOGS);
 	
 	// before timer teardown, make sure char device is destroyed so that userspace cannot issue new pings during timer teardown
