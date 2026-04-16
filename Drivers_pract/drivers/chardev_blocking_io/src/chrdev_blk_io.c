@@ -9,15 +9,18 @@
 #include <linux/wait.h>
 #include <linux/spinlock.h>
 #include <linux/poll.h>
+#include <linux/kfifo.h>
 
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Kernel module demonstrating blocking and non-blocking i/o");
 MODULE_AUTHOR("Firefly24");
 
+#define FIFO_SIZE 1024
+
 
 struct chrdev_state{
-	bool data_available;
+	//bool data_available;
 	bool terminating;
 	
 	wait_queue_head_t wq;
@@ -27,6 +30,8 @@ struct chrdev_state{
 	struct cdev cdev;
 	struct class *chdev_class;
 	struct device *ch_device;
+	
+	struct kfifo fifo;
 };
 
 
@@ -58,7 +63,7 @@ static __poll_t chrdev_blk_io_poll(struct file *dev_file, struct poll_table_stru
 	if (dev.terminating)
 		status |= POLLERR;
 		
-	if (dev.data_available)
+	if (!kfifo_is_empty(&dev.fifo))
 		status |= POLLIN | POLLRDNORM;  // check poll() syscall manpage for these bits
 	
 	spin_unlock(&dev.state_lock);
@@ -73,6 +78,8 @@ static ssize_t chrdev_blk_io_read(struct file *dev_file,
 				  loff_t *offset)
 {
 	int ret = 0;
+	// this buffer will be on stack which is limited size, move to heap allocation later
+	char buf[FIFO_SIZE];
 
 	// keep looping to wait for data to be available
 	for (;;)
@@ -84,18 +91,28 @@ static ssize_t chrdev_blk_io_read(struct file *dev_file,
 		if(dev.terminating)
 		{
 			spin_unlock(&dev.state_lock);
+			
 			// teardown logic here
 			return -ENODEV;
 		}
 		
 		// Validate if data is available
-		if (dev.data_available)
+		if (!kfifo_is_empty(&dev.fifo))
 		{
-			dev.data_available = false;
+			//dev.data_available = false;
+			
+			size_t data_avail = min(data_size,(size_t)kfifo_len(&dev.fifo));
+			ret = kfifo_out(&dev.fifo,buf,data_avail);
+			
 			spin_unlock(&dev.state_lock);
 			
 			// Do the data transfer here
-			return data_size;
+			if (copy_to_user(usr_buf,buf,data_avail)) {
+				pr_warn("Copy to user failed \n");
+				return -EFAULT;
+			}
+			
+			return data_avail;
 		}
 		
 		// For non-blocking I/O do not loop waiting for data 
@@ -105,11 +122,10 @@ static ssize_t chrdev_blk_io_read(struct file *dev_file,
 			return -EAGAIN;
 		}
 		
-		
 		spin_unlock(&dev.state_lock);
 		
 		// Sleep process again till state may have changed
-		ret = wait_event_interruptible(dev.wq, dev.data_available|| dev.terminating);
+		ret = wait_event_interruptible(dev.wq, dev.terminating|| !kfifo_is_empty(&dev.fifo) );
 		
 		if (ret)
 		{
@@ -127,24 +143,50 @@ static ssize_t chrdev_blk_io_write(struct file *dev_file,
 				   size_t data_size,
 				   loff_t *offset)
 {
-
+	// this buffer will be on stack which is limited size, move to heap allocation later
+	char buf[FIFO_SIZE];
+	//int len =0;
+	
+	if (data_size > FIFO_SIZE)
+		return -EINVAL;
+		
 	spin_lock(&dev.state_lock);
-	if (dev.terminating)
-	{
+	
+	// don't write if device in terminating state
+	if (dev.terminating) {
 		spin_unlock(&dev.state_lock);
 		return -ENODEV;
 	}
+	
+	// reject write if data is larger than available space on kfifo
+	if (kfifo_avail(&dev.fifo) < data_size) {
+		spin_unlock(&dev.state_lock);
+		return -EAGAIN;
+	}
+	
 	spin_unlock(&dev.state_lock);
 	
 	// data available, write data to kernel buffer here
+	if ( copy_from_user(buf,usr_buf,data_size) ) {
+		pr_warn("Content copy from user buffer failed\n");
+		return -EFAULT;
+	}
 	
+	//copy data to kfifo
+	// note: we're doing double copy, copy from user buf to kernel buf, then copy data to kfifo, can this be improved?
 	spin_lock(&dev.state_lock);
-	dev.data_available = true;
+	//dev.data_available = true;
+	if (kfifo_avail(&dev.fifo) < data_size)
+	{
+		spin_unlock(&dev.state_lock);
+		return -EAGAIN;
+	}
+	size_t data_copied = kfifo_in(&dev.fifo,buf,data_size);
 	spin_unlock(&dev.state_lock);
 	
-	wake_up_all(&dev.wq);
+	wake_up_interruptible(&dev.wq);
 	
-	return data_size;
+	return data_copied;
 }
 
 static const struct file_operations chrdev_blk_io_fops = {
@@ -163,12 +205,15 @@ static int __init chrdev_blk_init(void)
 {
 	int ret = 0;
 	
-	dev.data_available = false;
+	//dev.data_available = false;
 	dev.terminating = false;
+	
 	
 	init_waitqueue_head(&dev.wq);
 	spin_lock_init(&dev.state_lock);
 	
+	if ((ret = kfifo_alloc(&dev.fifo,FIFO_SIZE,GFP_KERNEL)))
+		return ret;
 	
 	if ( (ret = alloc_chrdev_region(&dev.device_num,0,1,"chrdev_io") ) )
 		goto cleanup;
@@ -212,7 +257,7 @@ del_cdev:
 unreg_chrdev:
 	unregister_chrdev_region(dev.device_num,1);
 cleanup:
-
+	kfifo_free(&dev.fifo);
 	return ret;
 }
 
@@ -232,6 +277,8 @@ static void __exit chrdev_blk_exit(void)
 	class_destroy(dev.chdev_class);
 	cdev_del(&dev.cdev);
 	unregister_chrdev_region(dev.device_num,1);
+	
+	kfifo_free(&dev.fifo);
 }
 
 
