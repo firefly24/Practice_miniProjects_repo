@@ -77,6 +77,7 @@ struct sw_wd_timer{
 	struct work_struct recovery_work;
 	
 	atomic_t expired;
+	wait_queue_head_t wq;
 };
 
 
@@ -110,6 +111,8 @@ static void sw_wd_timer_handle_expire(struct timer_list *t)
 		return;
 
 	atomic_set(&swd->armed,0);
+	
+	wake_up_interruptible(&swd->wq);
 	pr_warn("SW watchdog expired!\n");
 	schedule_work(&(swd->recovery_work));
 }
@@ -267,18 +270,32 @@ static ssize_t sw_wd_status_read(struct file* dev_file,
 	struct sw_wd_timer *wd = dev_file->private_data;
 
 	char status_buf[128];
-	int len;
+	int len,ret=0;
 
 	// only allow first read to be successful, as cat /dev/sw_wdog will keep reading in loop and cause panic on timeout
 	if (*offset !=0)
 		return 0;
 		
 	spin_lock(&wd->owner_lock);
-	bool is_owned = (wd->owner != NULL);
+	bool is_owner = (wd->owner == dev_file);
 	spin_unlock(&wd->owner_lock);
 	
-	len = scnprintf(status_buf, sizeof(status_buf)," Owned: %s, Armed: %d, Ping count: %d, Last pet time: %u, Expired: %d\n",
-				 (!is_owned)?"No":"Yes",
+	if (!is_owner)
+		return -EPERM;
+	
+	if (!atomic_read(&wd->expired))
+	{
+		ret = wait_event_interruptible(wd->wq,atomic_read(&wd->expired));
+		if (ret)
+		{
+			pr_warn("Read  interrupted by a signal \n");
+			return ret;
+		}
+	}
+	
+	
+	len = scnprintf(status_buf, sizeof(status_buf)," Owned caller: %s, Armed: %d, Ping count: %d, Last pet time: %u, Expired: %d\n",
+				 (!is_owner)?"No":"Yes",
 				 atomic_read(&wd->armed),
 				 atomic_read(&wd->ping_count),
 				 jiffies_to_msecs(wd->last_pet_jiffies),
@@ -424,6 +441,7 @@ static int __init sw_wd_timer_init(void)
 		// setup ownership attributes
 		wd->owner = NULL;
 		spin_lock_init(&wd->owner_lock);
+		init_waitqueue_head(&wd->wq);
 	
 		// setup timer first
 		wd->timeout_jiffies = msecs_to_jiffies(WD_DEFAULT_TIMEOUT_MS);
