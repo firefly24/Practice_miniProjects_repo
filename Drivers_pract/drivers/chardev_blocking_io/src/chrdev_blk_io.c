@@ -10,7 +10,7 @@
 #include <linux/spinlock.h>
 #include <linux/poll.h>
 #include <linux/kfifo.h>
-
+#include <linux/version.h>
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Kernel module demonstrating blocking and non-blocking i/o");
@@ -84,7 +84,6 @@ static ssize_t chrdev_blk_io_read(struct file *dev_file,
 	// keep looping to wait for data to be available
 	for (;;)
 	{
-	
 		spin_lock(&dev.state_lock);
 		
 		// handle teardown on termination
@@ -116,7 +115,7 @@ static ssize_t chrdev_blk_io_read(struct file *dev_file,
 		}
 		
 		// For non-blocking I/O do not loop waiting for data 
-		if (dev_file->f_flags & O_NONBLOCK)
+		if (dev_file->f_flags & O_NONBLOCK) 
 		{
 			spin_unlock(&dev.state_lock);
 			return -EAGAIN;
@@ -127,12 +126,10 @@ static ssize_t chrdev_blk_io_read(struct file *dev_file,
 		// Sleep process again till state may have changed
 		ret = wait_event_interruptible(dev.wq, dev.terminating|| !kfifo_is_empty(&dev.fifo) );
 		
-		if (ret)
-		{
+		if (ret) {
 			pr_info("Read interrupted by a signal\n");
 			return ret;
-		}	
-		
+		}		
 	}
 	return data_size;
 }
@@ -208,7 +205,6 @@ static int __init chrdev_blk_init(void)
 	//dev.data_available = false;
 	dev.terminating = false;
 	
-	
 	init_waitqueue_head(&dev.wq);
 	spin_lock_init(&dev.state_lock);
 	
@@ -226,22 +222,22 @@ static int __init chrdev_blk_init(void)
 		goto unreg_chrdev;
 	
 	// class creation
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,0,0)
+	dev.chdev_class = class_create(THIS_MODULE,"chrdev_io");
+#else
 	dev.chdev_class = class_create("chrdev_io");
-	if (IS_ERR_OR_NULL(dev.chdev_class))
-	{
+#endif
+	if (IS_ERR_OR_NULL(dev.chdev_class)) {
 		ret = PTR_ERR(dev.chdev_class);
 		goto del_cdev;
 	}
 	
 	// device creation
 	dev.ch_device = device_create(dev.chdev_class,NULL, dev.device_num, NULL, "chrdev_io");
-	if(IS_ERR(dev.ch_device))
-	{
+	if(IS_ERR(dev.ch_device)) {
 		ret = PTR_ERR(dev.ch_device);
 		goto del_class;
 	}
-	
-	
 	
 	pr_info("Blocking i/o character device created successfully\n");
 	
