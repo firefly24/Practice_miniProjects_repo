@@ -11,6 +11,7 @@
 #include <linux/kdev_t.h>
 #include <linux/compiler.h>
 #include <linux/delay.h>
+#include <linux/version.h>
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Darshana");
@@ -100,7 +101,8 @@ static void sw_wd_timer_trigger_panic(struct work_struct* work)
 /*This timer callback will run in softIRQ context*/
 static void sw_wd_timer_handle_expire(struct timer_list *t)
 {
-	struct sw_wd_timer *swd = container_of(t,struct sw_wd_timer,detect_expiry);
+	struct sw_wd_timer *swd;
+	swd = container_of(t,struct sw_wd_timer,detect_expiry);
 	
 	// Don't trigger expiry if already disarmed
 	if (!atomic_read(&swd->armed))
@@ -215,11 +217,12 @@ static void sw_wd_timer_disarm(struct sw_wd_timer *swd)
 
 static int sw_wd_open(struct inode* filenode, struct file* dev_file)
 {
+	struct sw_wd_timer *wd;
 	int minor_no = iminor(filenode);
 	if (minor_no >= MAX_WDOGS)
 		return -ENODEV;
 	
-	struct sw_wd_timer *wd = &wdog_instance[minor_no];
+	wd = &wdog_instance[minor_no];
 	
 	spin_lock(&wd->owner_lock);
 	
@@ -243,17 +246,19 @@ static ssize_t sw_wd_write(struct file* dev_file,
 			   size_t input_length, 
 			   loff_t* offset)
 {
+	bool is_owner;
+	int ret;
 	struct sw_wd_timer *wd = dev_file->private_data;
 	
 	// check for ownership
 	spin_lock(&wd->owner_lock);
-	bool is_owner  = (wd->owner == dev_file);
+	is_owner  = (wd->owner == dev_file);
 	spin_unlock(&wd->owner_lock);
 	
 	if(!is_owner)
 		return -EPERM;
 	
-	int ret = 0;	
+	ret = 0;	
 	if ((ret = sw_wd_timer_ping(wd)))
 		return ret;
 	
@@ -270,21 +275,21 @@ static ssize_t sw_wd_status_read(struct file* dev_file,
 	struct sw_wd_timer *wd = dev_file->private_data;
 
 	char status_buf[128];
-	int len,ret=0;
-
+	int len,ret;
+	bool is_owner;
+	
 	// only allow first read to be successful, as cat /dev/sw_wdog will keep reading in loop and cause panic on timeout
 	if (*offset !=0)
 		return 0;
 		
 	spin_lock(&wd->owner_lock);
-	bool is_owner = (wd->owner == dev_file);
+	is_owner = (wd->owner == dev_file);
 	spin_unlock(&wd->owner_lock);
 	
 	if (!is_owner)
 		return -EPERM;
 	
-	if (!atomic_read(&wd->expired))
-	{
+	if (!atomic_read(&wd->expired)){
 		ret = wait_event_interruptible(wd->wq,atomic_read(&wd->expired));
 		if (ret)
 		{
@@ -292,7 +297,6 @@ static ssize_t sw_wd_status_read(struct file* dev_file,
 			return ret;
 		}
 	}
-	
 	
 	len = scnprintf(status_buf, sizeof(status_buf)," Owned caller: %s, Armed: %d, Ping count: %d, Last pet time: %u, Expired: %d\n",
 				 (!is_owner)?"No":"Yes",
@@ -335,10 +339,12 @@ static int sw_wd_release(struct inode* filenode, struct file* dev_file)
 
 static long sw_wd_ioctl(struct file *dev_file, unsigned int cmd, unsigned long arg)
 {
+	bool is_permitted_owner;
+	int timeout,delay_time;
 	struct sw_wd_timer *wd  = dev_file->private_data;
 	
 	spin_lock(&wd->owner_lock);
-	bool is_permitted_owner = ((wd->owner == dev_file) || (cmd == WD_GET_STATUS));
+	is_permitted_owner = ((wd->owner == dev_file) || (cmd == WD_GET_STATUS));
 	spin_unlock(&wd->owner_lock);
 	
 	if (!is_permitted_owner)
@@ -357,7 +363,6 @@ static long sw_wd_ioctl(struct file *dev_file, unsigned int cmd, unsigned long a
 		break;
 	case WD_SET_TIMEOUT:
 	{
-		int timeout;
 		if (copy_from_user(&timeout,(int __user *)arg,sizeof(timeout)) )
 			return -EFAULT;
 			
@@ -383,9 +388,9 @@ static long sw_wd_ioctl(struct file *dev_file, unsigned int cmd, unsigned long a
 	}
 	case WD_SET_RECOVERY_POLICY:
 	{
+		enum wd_recovery_policy policy;
 		if (atomic_read(&wd->armed))
 			return -EBUSY;
-		enum wd_recovery_policy policy;
 		
 		if (copy_from_user(&policy,(int __user *)arg,sizeof(policy)) )
 			return -EFAULT; 
@@ -398,7 +403,6 @@ static long sw_wd_ioctl(struct file *dev_file, unsigned int cmd, unsigned long a
 	{
 		if (atomic_read(&wd->armed))
 			return -EBUSY;
-		int delay_time;
 		
 		if (copy_from_user(&delay_time, (int __user *)arg, sizeof(delay_time)))
 			return -EFAULT;
@@ -429,13 +433,13 @@ static const struct file_operations sw_wd_fops =  {
 
 static int __init sw_wd_timer_init(void)
 {
-	int ret=0;
+	int minor, success_device_count,ret=0;
 	
 	// create a device number for our character device
 	if( (ret = alloc_chrdev_region(&wdog_base_dev,0,MAX_WDOGS, "simple_wd_timer") ) )
 		return ret; 
 		
-	for(int minor=0;minor<MAX_WDOGS;minor++)
+	for(minor=0; minor<MAX_WDOGS; minor++)
 	{
 		struct sw_wd_timer *wd = &wdog_instance[minor];
 		// setup ownership attributes
@@ -465,17 +469,21 @@ static int __init sw_wd_timer_init(void)
 	if ((ret = cdev_add(&wdog_base_cdev,wdog_base_dev,MAX_WDOGS)) )
 		goto unreg_chrdev;
 	
-	// create device class under /sys/class 
+	// create device class under /sys/class
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6,0,0) 
+	wdog_base_class = class_create(THIS_MODULE,"simple_wd_timer");
+#else
 	wdog_base_class = class_create("simple_wd_timer");
+#endif
 	if (IS_ERR(wdog_base_class))
 	{
 		ret = PTR_ERR(wdog_base_class);
 		goto del_cdev;
 	}
 	
-	int success_device_count = 0;
+	success_device_count = 0;
 	//create device files under this class
-	for (int minor = 0; minor < MAX_WDOGS; minor++)
+	for (minor = 0; minor < MAX_WDOGS; minor++)
 	{
 		struct sw_wd_timer *wd = &wdog_instance[minor];
 		
@@ -502,19 +510,19 @@ static int __init sw_wd_timer_init(void)
 	return ret;
 
 del_device:
-	for(int i=0;i<success_device_count;i++)	
-		device_destroy(wdog_base_class, wdog_instance[i].device_number);	
+	for(minor=0; minor<success_device_count; minor++)	
+		device_destroy(wdog_base_class, wdog_instance[minor].device_number);	
 	class_destroy(wdog_base_class);
 	
 del_cdev:
 	cdev_del(&wdog_base_cdev);
 
 unreg_chrdev:
-	for (int i=0;i<MAX_WDOGS;i++)
+	for (minor=0; minor<MAX_WDOGS; minor++)
 	{
-		timer_delete_sync(&wdog_instance[i].detect_expiry);
-		cancel_work_sync(&wdog_instance[i].recovery_work);
-		cancel_delayed_work_sync(&wdog_instance[i].panic_work);
+		timer_delete_sync(&wdog_instance[minor].detect_expiry);
+		cancel_work_sync(&wdog_instance[minor].recovery_work);
+		cancel_delayed_work_sync(&wdog_instance[minor].panic_work);
 	}
 	unregister_chrdev_region(wdog_base_dev,MAX_WDOGS);
 	
@@ -523,8 +531,8 @@ unreg_chrdev:
 
 static void __exit sw_wd_timer_exit(void)
 {	
-	
-	for (int minor = 0;minor<MAX_WDOGS; minor++)
+	int minor;
+	for (minor=0; minor<MAX_WDOGS; minor++)
 	{
 		sw_wd_timer_disarm(&wdog_instance[minor]);
 		device_destroy(wdog_base_class, wdog_instance[minor].device_number);
