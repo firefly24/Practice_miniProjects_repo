@@ -23,7 +23,7 @@ public:
 	Frame(cv::Mat img, TimeStamp ts, unsigned int seq)
 	: img_(std::move(img)), timestamp_(ts), seq_(seq) {}
 	
-	cv::Mat& get_image()  { return img_; }
+	const cv::Mat& get_image() const { return img_; }
 	TimeStamp get_timestamp() const {return timestamp_;}
 	unsigned int get_seq() const { return seq_; }
 };
