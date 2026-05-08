@@ -1,3 +1,5 @@
+#pragma once
+
 #include <atomic>
 #include <memory>
 #include "frame.h"
@@ -13,21 +15,23 @@ class FrameSharedState {
 
 private:
 	// actual shared data between producer and consumer
-	std::atomic<std::shared_ptr<Frame>> latest_frame_{};
+	std::shared_ptr<Frame> frame_{};
 public:
-	void publish_frame(std::shared_ptr<Frame> frame)
+	void publish(std::shared_ptr<Frame> frame)
 	{
 		// Publishes the latest frame ready for consumption
 		/*
 		The frame shareptr is passed by value instead of reference, as then publish will have its own copy of the sharedptr, which will increment its refcount, which shows ownership transfer. Whereas if we pass sharedptr reference, publish will hold reference to original sharedptr but not have its own copy, and refount is not actually increased in this case. This blurrs the ownership boundary as the producer still holding the orignal reference has the power to modify frame data being consumed by consumer.
 		*/
-		latest_frame_.store(frame, std::memory_order_release);
+		std::atomic_store_explicit(&frame_,
+					std::move(frame),
+					 std::memory_order_release);
 	}
 
 	std::shared_ptr<Frame> get_latest_frame()
 	{
 		// returns the pointer to the latest available frame
-		return latest_frame_.load(std::memory_order_acquire);
+		return std::atomic_load_explicit(&frame_,std::memory_order_acquire);
 	
 	}
 };
