@@ -7,7 +7,7 @@
 #include <thread>
 #include <chrono>
 #include "../frame_shared_state.h"
-#include "pipeline_stats.h"
+#include "stats_mode.h"
 
 using Timepoint = std::chrono::steady_clock::time_point;
 
@@ -20,14 +20,15 @@ private:
 	int screen_refresh_ms;
 
 public:
-	PipelineStats stats_;
+	StatsType& stats_;
 	
 	Consumer(FrameSharedState& shared, 
 		std::atomic<bool>& running, 
+		StatsType& stats,
 		int refresh_time = 20)
 	: shared_state_(shared), running_(running),
 	screen_refresh_ms(refresh_time), last_seen_seq_(-1),
-	stats_("recorded_frame_stats.csv") {}
+	stats_(stats) {}
 	
 	void run()
 	{
@@ -47,7 +48,11 @@ public:
 			}
 			
 			if (last_seen_seq_ == snapshot->get_seq())
+			{
+				std::this_thread::sleep_for(
+					std::chrono::milliseconds(1));
 				continue;
+			}
 			
 			// record the frame in logs
 			display_time = std::chrono::steady_clock::now();
@@ -68,11 +73,6 @@ public:
 				break;
 			}
 		}
-	}
-	
-	void detect_latency()
-	{
-	
 	}
 	
 	void signal_stop()

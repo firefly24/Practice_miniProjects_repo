@@ -22,14 +22,14 @@ public:
 	unsigned int read_failures_;
 	int last_seq_;
 	double fps_;
-	double avg_latency_ms_;
+	double sum_latency_ms_;
 	double max_latency_ms_;
 	Timepoint start_time_;
 	
 		
 	FrameStats(): frame_count_(0),dropped_frames_(0),
 			null_frames_(0), read_failures_(0),last_seq_(-1),
-			fps_(0.0), avg_latency_ms_(0.0),max_latency_ms_(0.0),
+			fps_(0.0), sum_latency_ms_(0.0),max_latency_ms_(0.0),
 			start_time_(std::chrono::steady_clock::now()) {}
 					 
 	void reset_window(int last_seen_seq=-1)
@@ -40,8 +40,8 @@ public:
 		read_failures_	=0;
 		last_seq_	=last_seen_seq;
 		fps_		=0.0;
-		avg_latency_ms_	=0.0;
 		max_latency_ms_	=0.0;
+		sum_latency_ms_	=0.0;
 		start_time_	= std::chrono::steady_clock::now();
 	}
 	
@@ -49,6 +49,39 @@ public:
 	{
 		return std::chrono::duration_cast<std::chrono::milliseconds>
 			(std::chrono::steady_clock::now() - start_time_).count();
+	}
+	
+	void record_frame(int seq, double latency_ms)
+	{
+		//add dropped frame count from last displayed frame seq
+		dropped_frames_ += seq- last_seq_ -1 ;
+		
+		// update max capture->display latency
+		max_latency_ms_ = std::max(max_latency_ms_,latency_ms);
+		
+		// add latency to be used to calculate avg later
+		sum_latency_ms_ += latency_ms;
+		
+		// update the latest seen frame seq
+		last_seq_ = seq;
+		
+		// update total frames recorded
+		frame_count_++;
+	}
+	
+	void record_null_frame()
+	{
+		null_frames_++;
+	}
+	
+	void record_read_failure()
+	{
+		read_failures_++;
+	}	
+	
+	int get_last_seq()
+	{
+		return last_seq_;
 	}
 	
 	void print_stats()
@@ -67,7 +100,7 @@ public:
 		
 		std::cout << "frames:" << frame_count_
 			<< " fps:" << fps_ 
-			<< " avg latency:" << (avg_latency_ms_/frame_count_)
+			<< " avg latency:" << (sum_latency_ms_/frame_count_)
 			<< "ms max latency:" << max_latency_ms_
 			<< "ms dropped frames:" << dropped_frames_
 			<< " null_frames:" << null_frames_
@@ -100,67 +133,39 @@ public:
 	void record_frame(const Timepoint &capture_time,
 				const Timepoint display_time,const int& seq)
 	{
-		mtx_.lock();
+		
 		// log lifetime stats now
 		// give console output for now, log in csv later
-		auto duration = std::chrono::duration_cast<std::chrono::milliseconds>
-		(display_time - capture_time);
-		
-		// update max capture->display latency
-		lifetime_stats_.max_latency_ms_ = std::max(
-						lifetime_stats_.max_latency_ms_,
-						(double)duration.count());
-		
-		//add dropped frame count from last displayed frame seq
-		lifetime_stats_.dropped_frames_ += seq- lifetime_stats_.last_seq_ -1 ;
-		
-		// update the latest seen frame seq
-		lifetime_stats_.last_seq_ = seq;
-		
-		// add latency to be used to calculate avg later
-		lifetime_stats_.avg_latency_ms_ += duration.count();
-		
-		// update total frames recorded
-		lifetime_stats_.frame_count_++;
-		
-		// log windowed stats, but how to calculate windowed stats ? 
-		windowed_stats_.max_latency_ms_ = std::max(
-						windowed_stats_.max_latency_ms_,
-						(double)duration.count());
-						
-		windowed_stats_.dropped_frames_ =
-					 (seq- windowed_stats_.last_seq_ -1) ;
-		
-		/*
-		std::cout << seq << " " << windowed_stats_.last_seq_ 
-			<< " " << duration.count()<<std::endl; 
-		*/
-		windowed_stats_.last_seq_ = seq;
-		windowed_stats_.avg_latency_ms_ += duration.count();
-		windowed_stats_.frame_count_++;
-		
+		auto duration = std::chrono::duration<double, std::milli>
+		(display_time - capture_time).count();
+
+		mtx_.lock();
+		lifetime_stats_.record_frame(seq,duration);
+		windowed_stats_.record_frame(seq,duration);
 		mtx_.unlock();
 	}
 	
 	void record_null_frame()
 	{
 		mtx_.lock();
-		lifetime_stats_.null_frames_++;
-		windowed_stats_.null_frames_++;
+		lifetime_stats_.record_null_frame();
+		windowed_stats_.record_null_frame();
 		mtx_.unlock();
 	}
 	
 	void record_read_failure()
 	{
 		mtx_.lock();
-		lifetime_stats_.read_failures_++;
-		windowed_stats_.read_failures_++;
+		lifetime_stats_.record_read_failure();
+		windowed_stats_.record_read_failure();
 		mtx_.unlock();
 	}
 	
 	void print_lifetime_stats()
 	{
+		mtx_.lock();
 		FrameStats snapshot(lifetime_stats_);
+		mtx_.unlock();
 		snapshot.print_stats();	
 	}
 	
@@ -174,7 +179,7 @@ public:
 			// take snapshot
 			mtx_.lock();
 			FrameStats snapshot(windowed_stats_);
-			windowed_stats_.reset_window(snapshot.last_seq_);
+			windowed_stats_.reset_window(snapshot.get_last_seq());
 			mtx_.unlock();
 			
 			//print the snapshot stats
