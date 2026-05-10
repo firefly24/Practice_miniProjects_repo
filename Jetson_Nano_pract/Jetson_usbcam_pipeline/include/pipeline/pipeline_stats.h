@@ -15,7 +15,7 @@ using Timepoint = std::chrono::steady_clock::time_point;
 
 class FrameStats{
 
-public:
+private:
 	unsigned int frame_count_;
 	int dropped_frames_;
 	unsigned int null_frames_;
@@ -26,7 +26,7 @@ public:
 	double max_latency_ms_;
 	Timepoint start_time_;
 	
-		
+public:
 	FrameStats(): frame_count_(0),dropped_frames_(0),
 			null_frames_(0), read_failures_(0),last_seq_(-1),
 			fps_(0.0), sum_latency_ms_(0.0),max_latency_ms_(0.0),
@@ -84,7 +84,7 @@ public:
 		return last_seq_;
 	}
 	
-	void print_stats()
+	void print_stats_readable()
 	{
 		if (!frame_count_)
 		{
@@ -106,6 +106,26 @@ public:
 			<< " null_frames:" << null_frames_
 			<< std::endl;
 	}
+	
+	void print_stats_csv(std::ostream& out) 
+	{
+	
+		//if (!out.is_open())	return;
+			
+		fps_ = frame_count_ / (elapsed_time_ms()/1000.0);
+		
+		
+		out << elapsed_time_ms() << ","
+		 << frame_count_ << ","
+		 << fps_ << ","
+		 << ((frame_count_)?(sum_latency_ms_/frame_count_):0.0) << ","
+		 << max_latency_ms_ << ","
+		 << dropped_frames_ << ","
+		 << null_frames_ << ","
+		 << read_failures_ << "\n";
+		 
+		 out.flush();
+	}
 };
 
 class PipelineStats{
@@ -116,6 +136,7 @@ private:
 	FrameStats lifetime_stats_;
 	std::fstream stats_file_;
 	std::string filename_;
+	bool csv_enabled_;
 	
 	
 	std::atomic<bool> is_running{false};
@@ -124,9 +145,28 @@ private:
 	
 public:
 
-	PipelineStats(std::string filename):filename_(filename)
+	PipelineStats(std::string filename = ""):filename_(filename)
 	{
 		is_running.store(true, std::memory_order_release);
+		
+		if (filename == "")
+		{
+			csv_enabled_ = false;
+			return;
+		}
+		
+		stats_file_.open(filename_, std::ios::out | std::ios::trunc);
+		if (stats_file_.is_open())
+		{
+			stats_file_ << "window_ms,frames,fps,avg_latency_ms,max_latency_ms,"
+                       "dropped_frames,null_frames,read_failures\n";
+                       stats_file_.flush();
+                       csv_enabled_  = true;
+		}
+		else {
+			csv_enabled_ = false;
+			std::cout << "Failed to open stats file: " << filename_ << std::endl;
+		}
 	}
 	
 	// Consumer must record every frame in the stats
@@ -166,7 +206,7 @@ public:
 		mtx_.lock();
 		FrameStats snapshot(lifetime_stats_);
 		mtx_.unlock();
-		snapshot.print_stats();	
+		snapshot.print_stats_readable();	
 	}
 	
 	void print_periodic_stats(int interval = 1000)
@@ -183,7 +223,10 @@ public:
 			mtx_.unlock();
 			
 			//print the snapshot stats
-			snapshot.print_stats();
+			if(csv_enabled_)
+				snapshot.print_stats_csv(stats_file_);
+			else
+				snapshot.print_stats_readable();
 				
 		}
 	}

@@ -24,6 +24,7 @@ int main()
 	
 	//running.store(true,std::memory_order_release);
 	StatsType stats = StatsType("recorded_frame_stats.csv");
+	//StatsType stats;
 	
 	Producer cam_feed(latest_frame,running,stats,device_id);
 	Consumer display_feed(latest_frame,running,stats,screen_refresh_interval_ms);
