@@ -6,6 +6,7 @@
 #include <iostream>
 #include <chrono>
 #include <thread>
+#include <cstdint>
 #include "../frame_shared_state.h"
 #include "../capture_source.h"
 
@@ -19,7 +20,7 @@ private:
 	CaptureSource capture_;
 	FrameSharedState& shared_state_;
 	std::atomic<bool>& running_;
-	uint64_t seq_;
+	int seq_;
 	int device_id_;
 
 public:	
@@ -46,28 +47,20 @@ public:
 			return;
 		}
 		
-		/*
-		if (running_.exchange(true))
-		{
-			std::cout << "Producer is already running!"  << std::endl;
-			return;
-		}
-		*/
-		
 		// now read image in loop
 		while(running_.load(std::memory_order_acquire))
 		{
 			// capture image from source
-			if ( !capture_.read(img) && retry_count )
+			if ( !capture_.read(img) )
 			{
+				if (!(retry_count--)){
+					signal_stop();
+					break;
+				}
+				
 				// sleep for 5ms then loop again
 				std::this_thread::sleep_for(
 					std::chrono::milliseconds(5));
-				
-				retry_count--;
-				
-				if (!retry_count)
-					break;
 					
 				continue;
 			}
@@ -81,13 +74,14 @@ public:
 			seq_++;
 			shared_state_.publish(current_frame);
 		}
-		
+		std::cout << "Total frames rendered: " << seq_ << std::endl;
 		capture_.close();		
 	}
 	
 	void signal_stop()
 	{
-		running_.store(false, std::memory_order_relaxed);
+		running_.store(false, std::memory_order_release);
+		std::cout << "Total frames rendered: " << seq_ << std::endl;
 	}
 	
 };

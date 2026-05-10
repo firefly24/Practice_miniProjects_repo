@@ -3,6 +3,7 @@
 #include <thread>
 #include "../include/pipeline/producer.h"
 #include "../include/pipeline/consumer.h"
+#include "../include/pipeline/pipeline_stats.h"
 
 using namespace std;
 
@@ -28,9 +29,12 @@ int main()
 	
 	std::thread producer_thread(&Producer::run, &cam_feed);
 	std::thread consumer_thread(&Consumer::run, & display_feed);
+	
+	display_feed.stats_.start_print_stats();
 
 	producer_thread.join();
 	consumer_thread.join();
+	display_feed.stats_.stop_print_stats();
 	cv::destroyAllWindows();
 	
 	return 0;

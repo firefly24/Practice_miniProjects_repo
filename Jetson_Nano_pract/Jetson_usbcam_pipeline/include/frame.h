@@ -17,13 +17,13 @@ class Frame{
 private:
 	cv::Mat img_;
 	TimeStamp timestamp_;
-	unsigned int seq_;
+	int seq_;
 	
 public:
-	Frame(cv::Mat img, TimeStamp ts, unsigned int seq)
+	Frame(cv::Mat img, TimeStamp ts,int seq)
 	: img_(std::move(img)), timestamp_(ts), seq_(seq) {}
 	
 	const cv::Mat& get_image() const { return img_; }
 	TimeStamp get_timestamp() const {return timestamp_;}
-	unsigned int get_seq() const { return seq_; }
+	int get_seq() const { return seq_; }
 };
