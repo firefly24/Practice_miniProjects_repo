@@ -64,6 +64,9 @@ public:
 			// display the frame
 			cv::imshow("Camera feed", snapshot->get_image());
 			
+			//std::this_thread::sleep_for(
+			//		std::chrono::milliseconds(250));
+			
 			int key = cv::waitKey(screen_refresh_ms);
 			
 			if (key == 'q')

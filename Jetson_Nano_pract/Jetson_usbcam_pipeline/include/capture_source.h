@@ -11,7 +11,7 @@ private:
 public:
 	bool open(int device_id=0) /*: cam_capture_(device_id)*/
 	{
-		cam_capture_ = cv::VideoCapture(device_id);
+		cam_capture_ = cv::VideoCapture(device_id,cv::CAP_V4L2);
 		if(!cam_capture_.isOpened())
 		{
 			std::cout << "Camera feed open failed for device id:"
