@@ -74,6 +74,7 @@ public:
 			// Capture successful, bind this to shared state
 			std::shared_ptr<Frame> current_frame =
 				std::make_shared<Frame>(img,now,seq_);
+			
 			seq_++;
 			shared_state_.publish(current_frame);
 		}

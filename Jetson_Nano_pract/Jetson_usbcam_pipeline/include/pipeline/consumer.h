@@ -54,21 +54,28 @@ public:
 				continue;
 			}
 			
-			// record the frame in logs
+			/******* Add processing stage ***********************/
+			
+			cv::Mat processed_img;
+			
+			processImage(snapshot->get_image(), processed_img);
+			
+			/******* Record the frame in stats logs *************/
 			display_time = std::chrono::steady_clock::now();
 			stats_.record_frame(snapshot->get_timestamp(),display_time,
 						snapshot->get_seq());
 						
 			last_seen_seq_ = snapshot->get_seq();
-						
-			// display the frame
-			cv::imshow("Camera feed", snapshot->get_image());
+			
+			/******** display the frame **************************/
+			//cv::imshow("Camera feed", snapshot->get_image());
+			cv::imshow("Camera feed", processed_img);
 			
 			//std::this_thread::sleep_for(
 			//		std::chrono::milliseconds(250));
 			
+			/******* Wait before next refresh********************/
 			int key = cv::waitKey(screen_refresh_ms);
-			
 			if (key == 'q')
 			{
 				std::cout << "Key q is pressed, quitting stream" << std::endl;
@@ -76,6 +83,15 @@ public:
 				break;
 			}
 		}
+	}
+	
+	void processImage(const cv::Mat& src, cv::Mat &dest)
+	{
+		cv::cvtColor(src,dest, cv::COLOR_BGR2GRAY);
+		
+		cv::GaussianBlur(dest,dest, cv::Size(9,9),0 );
+		cv::Canny(dest, dest, 50,150);
+		return;
 	}
 	
 	void signal_stop()
