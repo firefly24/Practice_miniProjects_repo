@@ -6,10 +6,12 @@
 #include <memory>
 #include <thread>
 #include <chrono>
+#include <vector>
 #include "../frame_shared_state.h"
 #include "stats_mode.h"
 
 using Timepoint = std::chrono::steady_clock::time_point;
+
 
 class Consumer{
 
@@ -33,6 +35,13 @@ public:
 	void run()
 	{
 		Timepoint display_time;
+		
+		// Threshold sliders for canny edge detection
+		int thres1=50, thres2 = 150, max_thres = 255;
+		cv::namedWindow("Camera feed");
+		cv::createTrackbar("Thresh 1", "Camera feed", &thres1, max_thres, 0 );
+		cv::createTrackbar("Thresh 2", "Camera feed", &thres2, max_thres, 0 );
+		
 		while(running_.load(std::memory_order_acquire))
 		{
 			std::shared_ptr<Frame> snapshot = 
@@ -55,10 +64,11 @@ public:
 			}
 			
 			/******* Add processing stage ***********************/
-			
+			thres1 = cv::getTrackbarPos("Thresh 1", "Camera feed");
+			thres2 = cv::getTrackbarPos("Thresh 2", "Camera feed");
 			cv::Mat processed_img;
 			
-			processImage(snapshot->get_image(), processed_img);
+			processImage(snapshot->get_image(), processed_img,thres1,thres2);
 			
 			/******* Record the frame in stats logs *************/
 			display_time = std::chrono::steady_clock::now();
@@ -85,12 +95,33 @@ public:
 		}
 	}
 	
-	void processImage(const cv::Mat& src, cv::Mat &dest)
+	void processImage(const cv::Mat& src, cv::Mat &dest,int &thres1, int& thres2)
 	{
+		// convert to grayscale
 		cv::cvtColor(src,dest, cv::COLOR_BGR2GRAY);
 		
-		cv::GaussianBlur(dest,dest, cv::Size(9,9),0 );
-		cv::Canny(dest, dest, 50,150);
+		// Blur to reduce noise
+		cv::GaussianBlur(dest,dest, cv::Size(7,7),0 );
+		
+		// Canny edge detection 
+		//cv::Canny(dest, dest, 50,150);
+		cv::Canny(dest, dest, thres1,thres2);
+		
+		// finding Contours
+		std::vector<std::vector<cv::Point>> contours;
+		std::vector<cv::Vec4i> hierarchy;
+		cv::Mat edges_for_contours = dest.clone();
+		
+		cv::findContours(edges_for_contours,
+				 contours,
+				 hierarchy,
+				 cv::RETR_EXTERNAL,
+				 cv::CHAIN_APPROX_SIMPLE);
+				 
+		// Draw contours on a color copt of the original
+		dest = src.clone();
+		cv::drawContours(dest,contours,-1,cv::Scalar(0,255,0),2);
+		
 		return;
 	}
 	
