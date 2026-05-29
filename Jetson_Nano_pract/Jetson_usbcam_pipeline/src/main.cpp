@@ -29,15 +29,22 @@ int main()
 	Producer cam_feed(latest_frame,running,stats,device_id);
 	Consumer display_feed(latest_frame,running,stats,screen_refresh_interval_ms);
 	
+	
 	stats.start_print_stats();
 	
 	std::thread producer_thread(&Producer::run, &cam_feed);
-	std::thread consumer_thread(&Consumer::run, & display_feed);
+	//std::thread consumer_thread(&Consumer::run, & display_feed);
+	std::thread consumer_thread(&Consumer::runInference, & display_feed);
 
 	producer_thread.join();
 	consumer_thread.join();
 	
 	stats.stop_print_stats();
+	
+	
+	cv::Mat dummy;
+	//display_feed.processImageClass(dummy);
+	
 	cv::destroyAllWindows();
 	
 	return 0;

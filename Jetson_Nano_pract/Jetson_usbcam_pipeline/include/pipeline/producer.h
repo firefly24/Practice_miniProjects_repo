@@ -24,6 +24,8 @@ private:
 	StatsType& stats_;
 	int seq_;
 	int device_id_;
+	int capture_width_;
+	int capture_height_;
 
 public:	
 	Producer(FrameSharedState& shared, 
@@ -52,6 +54,9 @@ public:
 		// now read image in loop
 		while(running_.load(std::memory_order_acquire))
 		{
+#if ENABLE_STATS
+			Timepoint start = std::chrono::steady_clock::now();
+#endif
 			// capture image from source
 			if ( !capture_.read(img) )
 			{
@@ -71,6 +76,10 @@ public:
 			
 			Timepoint now = std::chrono::steady_clock::now();
 			
+#if ENABLE_STATS
+			std::cout << "Read latency: " << std::chrono::duration<double, std::milli>
+			(now -start).count() << std::endl;
+#endif	
 			// Capture successful, bind this to shared state
 			std::shared_ptr<Frame> current_frame =
 				std::make_shared<Frame>(img,now,seq_);

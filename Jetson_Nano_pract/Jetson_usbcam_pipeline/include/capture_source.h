@@ -8,6 +8,9 @@ class CaptureSource {
 
 private:
 	cv::VideoCapture cam_capture_;
+	int capture_width_;
+	int capture_height_;
+
 public:
 	bool open(int device_id=0) /*: cam_capture_(device_id)*/
 	{
@@ -18,6 +21,8 @@ public:
 				<< device_id << std::endl;
 			return false;
 		}	
+		capture_width_ = static_cast<int>(cam_capture_.get(cv::CAP_PROP_FRAME_WIDTH));
+		capture_height_ = static_cast<int>(cam_capture_.get(cv::CAP_PROP_FRAME_HEIGHT));
 		return true;
 	}
 	
@@ -37,6 +42,9 @@ public:
 	{
 		if (cam_capture_.isOpened())
 			cam_capture_.release();
+			
+		std::cout << "capture width: " << capture_width_
+			<< " height: "<< capture_height_ << std::endl;
 	}
 	
 	~CaptureSource()
