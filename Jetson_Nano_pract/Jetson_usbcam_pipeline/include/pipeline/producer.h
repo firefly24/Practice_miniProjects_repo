@@ -39,6 +39,7 @@ public:
 	
 	void run()
 	{
+		pthread_setname_np(pthread_self(), "Producer");
 		cv::Mat img;
 		int retry_count = RETRY_COUNT;
 		
@@ -54,9 +55,7 @@ public:
 		// now read image in loop
 		while(running_.load(std::memory_order_acquire))
 		{
-#if ENABLE_STATS
-			Timepoint start = std::chrono::steady_clock::now();
-#endif
+			nvtx3::scoped_range r{"Capture",nvtx3::payload{static_cast<uint64_t>(seq_)}};
 			// capture image from source
 			if ( !capture_.read(img) )
 			{
@@ -76,10 +75,6 @@ public:
 			
 			Timepoint now = std::chrono::steady_clock::now();
 			
-#if ENABLE_STATS
-			std::cout << "Read latency: " << std::chrono::duration<double, std::milli>
-			(now -start).count() << std::endl;
-#endif	
 			// Capture successful, bind this to shared state
 			std::shared_ptr<Frame> current_frame =
 				std::make_shared<Frame>(img,now,seq_);

@@ -3,6 +3,7 @@
 #include <atomic>
 #include <memory>
 #include "frame.h"
+#include "pipeline/stats_mode.h"
 
 /**
 *Notes:
@@ -26,6 +27,8 @@ public:
 		std::atomic_store_explicit(&frame_,
 					std::move(frame),
 					 std::memory_order_release);
+					 
+		nvtx3::mark("publishLatestFrame");
 	}
 
 	std::shared_ptr<Frame> get_latest_frame()

@@ -211,6 +211,8 @@ public:
 	
 	void print_periodic_stats(int interval = 1000)
 	{
+		pthread_setname_np(pthread_self(), "Logger");
+		
 		while(is_running.load(std::memory_order_acquire))
 		{
 			// wait for stats to collect
@@ -233,6 +235,7 @@ public:
 	
 	void start_print_stats(int interval = 1000)
 	{
+	
 		logger_thread = std::thread(&PipelineStats::print_periodic_stats,
 						this,interval);
 	}

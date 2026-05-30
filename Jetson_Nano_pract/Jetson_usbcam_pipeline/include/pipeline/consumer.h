@@ -1,17 +1,16 @@
 #pragma once
 
 #include <opencv2/opencv.hpp>
-#include <opencv2/dnn.hpp>
-#include <opencv2/imgproc.hpp>
 #include <iostream>
 #include <atomic>
 #include <memory>
 #include <thread>
+#include <pthread.h>
 #include <chrono>
 #include <vector>
 #include "../frame_shared_state.h"
 #include "stats_mode.h"
-#include "../../models/labelsimagenet1k.h"
+#include "image_classifier.h"
 
 using Timepoint = std::chrono::steady_clock::time_point;
 
@@ -33,9 +32,6 @@ private:
 	int last_seen_seq_;
 	int screen_refresh_ms;
 	PrevFrameState prev_frame_;
-	
-	// For inference pipeline
-	cv::dnn::Net classifier_;
 
 public:
 	StatsType& stats_;
@@ -47,6 +43,8 @@ public:
 	: shared_state_(shared), running_(running),
 	screen_refresh_ms(refresh_time), last_seen_seq_(-1),
 	stats_(stats) {}
+	
+	/* Function to run image processing on camera feed*/
 	
 	void run()
 	{
@@ -91,9 +89,6 @@ public:
 			/******** display the frame **************************/
 			cv::imshow("Camera feed", processed_img);
 			
-			//std::this_thread::sleep_for(
-			//		std::chrono::milliseconds(250));
-			
 			/******* Wait before next refresh********************/
 			int key = cv::waitKey(screen_refresh_ms);
 			if (key == 'q')
@@ -105,20 +100,27 @@ public:
 		}
 	}
 	
-	void runInference()
+	/* Function to run dnn models inference on live camera feed*/
+	
+	void runInference(ImageClassifier &classifier)
 	{
+		pthread_setname_np(pthread_self(), "Consumer");
+		
 		Timepoint display_time;
+		Prediction pred;
+		cv::Mat display_img;
 
 		cv::namedWindow("Camera feed");
 		
-		classifier_ = cv::dnn::readNetFromONNX("/home/darshana/practice/Practice_miniProjects_repo/Jetson_Nano_pract/Jetson_usbcam_pipeline/models/image_classification_mobilenetv2_2022apr.onnx");
-		
-		// how to handle failure exception here ? 
-		
 		while(running_.load(std::memory_order_acquire))
 		{
+			
 			std::shared_ptr<Frame> snapshot = 
 						shared_state_.get_latest_frame();
+			
+			uint64_t seq = 	(!snapshot)?0:static_cast<uint64_t>(snapshot->get_seq());
+					
+			nvtx3::scoped_range c{"consume", nvtx3::payload{seq}};
 						
 			if(!snapshot)
 			{
@@ -136,10 +138,21 @@ public:
 				continue;
 			}
 			
-			/******* Add processing stage ***********************/
-			//cv::Mat processed_img;
+			uint64_t dropped = seq - last_seen_seq_ - 1;
 			
-			processImageClass(snapshot->get_image());
+			if (dropped >0)
+			{
+				nvtx3::mark(nvtx3::event_attributes{"DroppedFrames",
+							 nvtx3::payload{dropped}});
+			}
+			
+			/******* Add processing stage ***********************/
+			display_img = snapshot->get_image().clone();
+			
+			pred = classifier.infer(snapshot->get_image());
+			classifier.drawPrediction(display_img, pred);
+			
+			//std::cout << "Predicted class: " << pred.label << std::endl;
 			
 			/******* Record the frame in stats logs *************/
 			display_time = std::chrono::steady_clock::now();
@@ -149,7 +162,8 @@ public:
 			last_seen_seq_ = snapshot->get_seq();
 			
 			/******** display the frame **************************/
-			cv::imshow("Camera feed", snapshot->get_image());
+			nvtx3::scoped_range s{"ShowFrame"};
+			cv::imshow("Camera feed", display_img);
 			
 			/******* Wait before next refresh********************/
 			int key = cv::waitKey(screen_refresh_ms);
@@ -160,32 +174,6 @@ public:
 				break;
 			}
 		}
-	}
-	
-	void processImageClass(const cv::Mat& src)
-	{
-		/*	Preprocess input to resize*/
-		cv::Mat blob = cv::dnn::blobFromImage(src,
-						1.0/255.0, 
-						cv::Size(224,224),
-						cv::Scalar(),true,false);
-		
-		/*	Run Inference	*/
-		classifier_.setInput(blob);
-		cv::Mat prob = classifier_.forward();
-		
-		
-		/* find class with highest probability*/
-		double maxProb;
-		cv::Point classIdPoint;
-		cv::minMaxLoc(prob.reshape(1,1),0,&maxProb,0,&classIdPoint);
-		
-		auto labels = getLabelsImagenet1k();
-		
-		/* std::cout << "Predicted Class ID: " << labels[classIdPoint.x] 
-		 	<< " with confidence " << maxProb << std::endl;
-    		*/
-    		return ;
 	}
 	
 	//Contour detection

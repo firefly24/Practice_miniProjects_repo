@@ -1,6 +1,7 @@
 #include <opencv2/opencv.hpp>
 #include <iostream>
 #include <thread>
+#include <pthread.h>
 #include "../include/pipeline/producer.h"
 #include "../include/pipeline/consumer.h"
 #include "../include/pipeline/stats_mode.h"
@@ -16,6 +17,8 @@ int main()
 	cout << "frame widthxheight: " << frame_width << "x" << frame_height << endl;
 	*/
 	
+	pthread_setname_np(pthread_self(), "MainThread");
+	
 	
 	FrameSharedState latest_frame;
 	std::atomic<bool> running{true};
@@ -29,21 +32,18 @@ int main()
 	Producer cam_feed(latest_frame,running,stats,device_id);
 	Consumer display_feed(latest_frame,running,stats,screen_refresh_interval_ms);
 	
+	ImageClassifier classifier("/home/darshana/practice/Practice_miniProjects_repo/Jetson_Nano_pract/Jetson_usbcam_pipeline/models/image_classification_mobilenetv2_2022apr.onnx");
 	
 	stats.start_print_stats();
 	
 	std::thread producer_thread(&Producer::run, &cam_feed);
 	//std::thread consumer_thread(&Consumer::run, & display_feed);
-	std::thread consumer_thread(&Consumer::runInference, & display_feed);
+	std::thread consumer_thread(&Consumer::runInference, &display_feed, std::ref(classifier));
 
 	producer_thread.join();
 	consumer_thread.join();
 	
 	stats.stop_print_stats();
-	
-	
-	cv::Mat dummy;
-	//display_feed.processImageClass(dummy);
 	
 	cv::destroyAllWindows();
 	

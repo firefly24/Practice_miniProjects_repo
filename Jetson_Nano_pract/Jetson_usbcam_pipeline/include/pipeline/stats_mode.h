@@ -2,6 +2,7 @@
 
 #include <string>
 #include <chrono>
+#include <nvtx3/nvtx3.hpp>
 
 using Timepoint = std::chrono::steady_clock::time_point;
 
