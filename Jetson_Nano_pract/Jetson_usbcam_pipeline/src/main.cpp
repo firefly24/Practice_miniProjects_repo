@@ -23,7 +23,7 @@ int main()
 	FrameSharedState latest_frame;
 	std::atomic<bool> running{true};
 	int device_id =0;
-	int screen_refresh_interval_ms = 20;
+	int screen_refresh_interval_ms = 10;
 	
 	//running.store(true,std::memory_order_release);
 	StatsType stats = StatsType("recorded_frame_stats.csv");

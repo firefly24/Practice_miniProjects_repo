@@ -2,6 +2,7 @@
 
 #include <opencv2/opencv.hpp>
 #include <iostream>
+#include "pipeline/stats_mode.h"
 
 
 class CaptureSource {
@@ -28,6 +29,7 @@ public:
 	
 	bool read(cv::Mat& captured_frame)
 	{
+		nvtx3::scoped_range r{"CameraCapture"};
 		if (!cam_capture_.isOpened())
 		{
 			std::cout << "Camera device failed open!" << std::endl;
