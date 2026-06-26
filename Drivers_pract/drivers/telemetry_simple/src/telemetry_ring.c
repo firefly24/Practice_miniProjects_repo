@@ -15,13 +15,19 @@ int ring_init(struct telemetry_ring_buf *buf, uint32_t capacity)
 	
 	//buf->buf_size = 0;
 	buf->capacity = capacity+1;
-	
-	// initialize indexes
-	WRITE_ONCE(buf->read_idx,0);
-	WRITE_ONCE(buf->write_idx,0);
+	ring_reset(buf);
 
 	printk(KERN_INFO "Buffer allocated successfully\n");
 	return 0;
+}
+
+void ring_reset(struct telemetry_ring_buf *buf)
+{
+	atomic_set(&buf->available_records,0);
+	WRITE_ONCE(buf->read_idx ,0);
+	WRITE_ONCE(buf->write_idx,0);
+	
+	return;
 }
 
 bool ring_full(struct telemetry_ring_buf *buf)
@@ -33,6 +39,8 @@ bool ring_empty(struct telemetry_ring_buf *buf)
 {
 	return (READ_ONCE(buf->write_idx) == READ_ONCE(buf->read_idx));
 }
+
+
 
 ssize_t ring_push(struct telemetry_ring_buf *buf,struct telemetry_record *record)
 {
@@ -53,12 +61,19 @@ ssize_t ring_push(struct telemetry_ring_buf *buf,struct telemetry_record *record
 	// publish record and increment index
 	next_tail = (buf->write_idx+1)%buf->capacity;
 	WRITE_ONCE(buf->write_idx,next_tail);
+	atomic_inc(&buf->available_records);
 	
 	// TODO: who will notify that new data is available now 
 	
 	return 0;
 }
 
+
+ssize_t records_available(struct telemetry_ring_buf *buf)
+{
+	return atomic_read(&buf->available_records);
+	//return 0;
+}
 
 ssize_t ring_pop(struct telemetry_ring_buf *buf,struct telemetry_record *record)
 {
@@ -75,6 +90,7 @@ ssize_t ring_pop(struct telemetry_ring_buf *buf,struct telemetry_record *record)
 	//publish new head
 	next_head = (READ_ONCE(buf->read_idx)+1) % buf->capacity;
 	WRITE_ONCE(buf->read_idx, next_head);
+	atomic_dec(&buf->available_records);
 	
 	//TODO: who will inform that free space is available now
 	
