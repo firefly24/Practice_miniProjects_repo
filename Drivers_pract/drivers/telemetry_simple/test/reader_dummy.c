@@ -33,7 +33,10 @@ int main(void)
 		ssize_t n = read(fd,rec,sizeof(rec));
 		
 		if (n<0)
-			continue;
+		{
+			perror("Read error!");
+			break;
+		}
 		
 		num_records = n/ record_size;
 		
@@ -43,9 +46,7 @@ int main(void)
 		{
 			printf("seq: %lu, value: %u\n",rec[i].seq_no, rec[i].value);
 		}
-		sleep(2);
-		
-		
+		//sleep(2);
 	}
 
 	return 0;

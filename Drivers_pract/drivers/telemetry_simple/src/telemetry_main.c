@@ -40,7 +40,7 @@ struct telemetry_dev{
 	
 
 	// Ownership and lifecycle tracking
-	bool shutdown_requested;
+	bool shutdown_session;
 	bool has_owner;
 	spinlock_t ownership_lock;
 	
@@ -56,37 +56,44 @@ struct telemetry_dev *tdev;
 static int producer_thread_fn(void *data)
 {
 	struct telemetry_dev *tdev = data;
-	struct telemetry_record *record;
+	//struct telemetry_record *record;
+	struct telemetry_record record;
+	int ret=0;
 	
-	if(data == NULL)
+	if(!data)
 		return -EINVAL;
 		
 	if (tdev->buf.records == NULL)
 		return -EINVAL;
-	
-	record = kzalloc(sizeof(struct telemetry_record), GFP_KERNEL);
-	
-	if (!record)
-		return -ENOMEM;
 	
 	printk(KERN_INFO "Starting Producer thread\n");
 	
 	while(!kthread_should_stop())
 	{
 		// generate record
-		record->seq_no = tdev->seq_no++;
-		record->timestamp_ms = ktime_to_ms(ktime_get());
-		record->value = 42;
+		record.seq_no = tdev->seq_no++;
+		record.timestamp_ms = ktime_to_ms(ktime_get());
+		record.value = 42;
+		
+		ret = wait_event_interruptible(tdev->has_space_wq,
+					!ring_full(&tdev->buf) || READ_ONCE(tdev->shutdown_session));
+		
+		// interuupted by a signal
+		if(ret)
+			return ret;
+			
+		if(READ_ONCE(tdev->shutdown_session))
+			return 0;
 		
 		// push to ring buffer
-		//ring_push(&tdev->buf, record);
-		if ( ring_push(&tdev->buf,record) == 0 )
+		if ( ring_push(&tdev->buf,&record) == 0 )
 		{
-			printk(KERN_INFO "Successfully pushed: %llu\n",record->seq_no );
+			wake_up_interruptible(&tdev->has_data_wq);
+			printk(KERN_INFO "Successfully pushed: %llu\n",record.seq_no );	
 		}
 		else
 		{
-			printk(KERN_INFO "Failed to push%llu\n",record->seq_no);
+			printk(KERN_INFO "Failed to push%llu\n",record.seq_no);
 		}
 		
 		//sleep 
@@ -95,9 +102,7 @@ static int producer_thread_fn(void *data)
 	
 	printk(KERN_INFO "Stopping producer thread\n");
 	
-	kfree(record);
-	
-	return 0;
+	return ret;
 }
 
 int producer_thread_set_and_run(struct telemetry_dev *tdev)
@@ -147,6 +152,8 @@ static int telemetry_open(struct inode *filenode, struct file *dev_file)
 	
 	spin_unlock(&tdev->ownership_lock);
 	
+	WRITE_ONCE(tdev->shutdown_session,false);
+	
 	printk(KERN_INFO "Open: Acquiring telemetry device ownership\n");
 	
 	/* Run the producer thread after taking ownership*/
@@ -166,14 +173,20 @@ static int telemetry_release(struct inode *filenode, struct file *dev_file)
 	
 	printk(KERN_INFO "Releasing telemetry device ownership\n");
 	
+	WRITE_ONCE(tdev->shutdown_session,true);
+	wake_up_all(&tdev->has_data_wq);
+	wake_up_all(&tdev->has_space_wq);
+	
 	/* stop producer thread and complete work before releasing ownership*/
 	if(tdev->producer_thread != NULL)
 	{
 		kthread_stop(tdev->producer_thread);
+		
 		tdev->producer_thread = NULL;
 	}
 	
 	ring_reset(&tdev->buf);
+	//WRITE_ONCE(tdev->shutdown_session,false);
 	
 	/* release ownership of device */
 	spin_lock(&tdev->ownership_lock);
@@ -191,22 +204,30 @@ static ssize_t telemetry_read(struct file *dev_file,
 
 	struct telemetry_dev *tdev = dev_file->private_data;
 	
-	int idx=0,ret =0;	
-	int records_to_return =0;
+	size_t idx=0;
+	int ret =0;	
+	ssize_t records_to_return =0;
 	ssize_t bytes_to_copy =0;
 	struct telemetry_record *records;
 	ssize_t records_requested = data_size/ sizeof(struct telemetry_record);
 	
 	// This read version will only work for single producer single consumer model
 	
-	if(!records_requested)
+	if(records_requested <=0)
 		return -EINVAL;
 		
-	if(ring_empty(&tdev->buf))
-		return -ENODATA;
+	// Block until data is available in the ring
+	ret = wait_event_interruptible(tdev->has_data_wq, 
+					!ring_empty(&tdev->buf) || READ_ONCE(tdev->shutdown_session));
 	
+	// Read interrupted by a signal
+	if(ret)
+		return ret; 
+		
+	if(READ_ONCE(tdev->shutdown_session))
+		return 0;
 	
-	records_to_return = min(records_available(&tdev->buf), records_requested);
+	records_to_return = min_t(ssize_t,records_available(&tdev->buf), records_requested);
 	bytes_to_copy = records_to_return*sizeof(struct telemetry_record);
 	
 	if (records_to_return <= 0)
@@ -215,8 +236,7 @@ static ssize_t telemetry_read(struct file *dev_file,
 	records = kcalloc(records_to_return,sizeof(struct telemetry_record), GFP_KERNEL);
 	if (!records)
 		return -ENOMEM;
-	
-	
+
 	// TODO: How to avoid multiple copies of record data here
 		
 	while(idx< records_to_return)
@@ -225,15 +245,20 @@ static ssize_t telemetry_read(struct file *dev_file,
 		idx++;
 	}
 	
+	wake_up_interruptible(&tdev->has_space_wq);
+	
 	// Since telemetry buffer is ring buffer, we cannot guarantee contiguous data in memory, so using a temporary buffer to copy availble data first
 	ret = copy_to_user(user_buf,records,bytes_to_copy);
 	if(ret)
+	{
+		ret = -EFAULT;
 		goto free_records;
-	
+	}
 	ret = bytes_to_copy;
 	
 free_records:
 	kfree(records);
+	
 	
 	return ret;
 }
@@ -270,6 +295,9 @@ static int __init telemetry_dev_init(void)
 	tdev->has_owner = false;
 	spin_lock_init(&tdev->ownership_lock);
 	tdev->seq_no = 0;
+	init_waitqueue_head(&tdev->has_data_wq);
+	init_waitqueue_head(&tdev->has_space_wq);
+	tdev->shutdown_session = false;
 		
 	/* Initialize char device file */
 	
