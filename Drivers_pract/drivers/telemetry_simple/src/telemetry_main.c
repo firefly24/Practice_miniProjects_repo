@@ -45,8 +45,11 @@ struct telemetry_dev{
 	bool has_owner;
 	spinlock_t ownership_lock;
 	
-	// device info
+	// device properties info
 	uint64_t seq_no;
+	
+	// Statistics for later measurements
+	struct telemetry_stats stats;
 };
 
 struct telemetry_dev *tdev;
@@ -67,7 +70,7 @@ static int producer_thread_fn(void *data)
 	if (tdev->buf.records == NULL)
 		return -EINVAL;
 	
-	printk(KERN_INFO "Starting Producer thread\n");
+	pr_info("Starting Producer thread\n");
 	
 	while(!kthread_should_stop())
 	{
@@ -89,19 +92,24 @@ static int producer_thread_fn(void *data)
 		// push to ring buffer
 		if ( ring_push(&tdev->buf,&record) == 0 )
 		{
+			// TODO: type mismatch between occupancy parameter 
+			telemetry_stats_generated(&tdev->stats);
+			telemetry_stats_update_max_occupancy(&tdev->stats,
+								records_available(&tdev->buf));
 			wake_up_interruptible(&tdev->has_data_wq);
-			printk(KERN_INFO "Successfully pushed: %llu\n",record.seq_no );	
+			
+			pr_info("Successfully pushed: %llu\n",record.seq_no );	
 		}
 		else
 		{
-			printk(KERN_INFO "Failed to push%llu\n",record.seq_no);
+			pr_info("Failed to push%llu\n",record.seq_no);
 		}
 		
 		//sleep 
 		msleep(PRODUCER_SLEEP_MS);
 	}
 	
-	printk(KERN_INFO "Stopping producer thread\n");
+	pr_info("Stopped producer thread\n");
 	
 	return ret;
 }
@@ -144,7 +152,7 @@ static int telemetry_open(struct inode *filenode, struct file *dev_file)
 	if (tdev->has_owner)
 	{
 		spin_unlock(&tdev->ownership_lock);
-		printk(KERN_INFO "Device is already opened by another process\n");
+		pr_err( "Device is already opened by another process\n");
 		return -EBUSY;
 	}
 	
@@ -155,11 +163,14 @@ static int telemetry_open(struct inode *filenode, struct file *dev_file)
 	
 	WRITE_ONCE(tdev->shutdown_session,false);
 	
-	printk(KERN_INFO "Open: Acquiring telemetry device ownership\n");
+	telemetry_stats_reset(&tdev->stats);
+	
+	pr_info("Open: Acquired telemetry device ownership\n");
 	
 	/* Run the producer thread after taking ownership*/
 	if ( (ret = producer_thread_set_and_run(tdev)) )
 	{
+		// release ownership if producer thread fails
 		spin_lock(&tdev->ownership_lock);
 		tdev->has_owner = false;
 		spin_unlock(&tdev->ownership_lock);
@@ -171,8 +182,6 @@ static int telemetry_open(struct inode *filenode, struct file *dev_file)
 static int telemetry_release(struct inode *filenode, struct file *dev_file)
 {
 	struct telemetry_dev *tdev = dev_file->private_data;
-	
-	printk(KERN_INFO "Releasing telemetry device ownership\n");
 	
 	WRITE_ONCE(tdev->shutdown_session,true);
 	wake_up_all(&tdev->has_data_wq);
@@ -187,12 +196,16 @@ static int telemetry_release(struct inode *filenode, struct file *dev_file)
 	}
 	
 	ring_reset(&tdev->buf);
-	//WRITE_ONCE(tdev->shutdown_session,false);
+	
+	// let's dump session stats before releasing session
+	telemetry_stats_dump(&tdev->stats);
 	
 	/* release ownership of device */
 	spin_lock(&tdev->ownership_lock);
 	tdev->has_owner = false;
 	spin_unlock(&tdev->ownership_lock);
+	
+	pr_info("Released telemetry device ownership\n");
 	
 	return 0;
 }
@@ -210,7 +223,7 @@ static ssize_t telemetry_read(struct file *dev_file,
 	ssize_t records_to_return =0;
 	ssize_t bytes_to_copy =0;
 	struct telemetry_record *records;
-	ssize_t records_requested = data_size/ sizeof(struct telemetry_record);
+	size_t records_requested = data_size/ sizeof(struct telemetry_record);
 	
 	// This read version will only work for single producer single consumer model
 	
@@ -228,7 +241,7 @@ static ssize_t telemetry_read(struct file *dev_file,
 	if(READ_ONCE(tdev->shutdown_session))
 		return 0;
 	
-	records_to_return = min_t(ssize_t,records_available(&tdev->buf), records_requested);
+	records_to_return = min_t(size_t,records_available(&tdev->buf), records_requested);
 	bytes_to_copy = records_to_return*sizeof(struct telemetry_record);
 	
 	if (records_to_return <= 0)
@@ -245,7 +258,8 @@ static ssize_t telemetry_read(struct file *dev_file,
 		ring_pop(&tdev->buf,&records[idx]); 
 		idx++;
 	}
-	
+	// TODO: parameter type mismatch
+	telemetry_stats_consumed(&tdev->stats,records_to_return);
 	wake_up_interruptible(&tdev->has_space_wq);
 	
 	// Since telemetry buffer is ring buffer, we cannot guarantee contiguous data in memory, so using a temporary buffer to copy availble data first
@@ -285,7 +299,7 @@ static int __init telemetry_dev_init(void)
 	if (!tdev)
 		return -ENOMEM;
 	
-	printk(KERN_INFO "Telemetry_init\n");
+	pr_info("Telemetry_init\n");
 		
 	/* Create and initialize ring buffer for telemetry records */
 	if ((ret = ring_init(&tdev->buf, capacity)) )
@@ -298,7 +312,8 @@ static int __init telemetry_dev_init(void)
 	tdev->seq_no = 0;
 	init_waitqueue_head(&tdev->has_data_wq);
 	init_waitqueue_head(&tdev->has_space_wq);
-	tdev->shutdown_session = false;
+	WRITE_ONCE(tdev->shutdown_session,false);
+	telemetry_stats_init(&tdev->stats,capacity);
 		
 	/* Initialize char device file */
 	
@@ -335,7 +350,7 @@ static int __init telemetry_dev_init(void)
 		goto class_del;
 	}
 	
-	printk(KERN_INFO "Telemetry device created successfully\n");
+	pr_info("Telemetry device created successfully\n");
 	
 	return 0;
 	
@@ -371,7 +386,7 @@ static void __exit telemetry_dev_exit(void)
 	ring_destroy(&tdev->buf);
 	kfree(tdev);
 	
-	printk(KERN_INFO "Telemetry exit\n");
+	pr_info("Telemetry exit\n");
 	
 	return;
 }
