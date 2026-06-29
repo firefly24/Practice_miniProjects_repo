@@ -13,6 +13,7 @@
 #include <linux/fs.h>
 #include <linux/spinlock.h>
 #include "telemetry_ring.h"
+#include "telemetry_stats.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("firelfy24");
