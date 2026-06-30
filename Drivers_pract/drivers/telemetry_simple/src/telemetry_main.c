@@ -79,6 +79,11 @@ static int producer_thread_fn(void *data)
 		record.timestamp_ms = ktime_to_ms(ktime_get());
 		record.value = 42;
 		
+		//record the number of times producer is blocked wating for queue space
+		// this may have some races
+		if (ring_full(&tdev->buf))
+			telemetry_stats_producer_blocked(&tdev->stats);
+			
 		ret = wait_event_interruptible(tdev->has_space_wq,
 					!ring_full(&tdev->buf) || READ_ONCE(tdev->shutdown_session));
 		
@@ -94,8 +99,7 @@ static int producer_thread_fn(void *data)
 		{
 			// TODO: type mismatch between occupancy parameter 
 			telemetry_stats_generated(&tdev->stats);
-			telemetry_stats_update_max_occupancy(&tdev->stats,
-								records_available(&tdev->buf));
+			telemetry_stats_max_occupancy(&tdev->stats,records_available(&tdev->buf));
 			wake_up_interruptible(&tdev->has_data_wq);
 			
 			pr_info("Successfully pushed: %llu\n",record.seq_no );	
@@ -122,7 +126,9 @@ int producer_thread_set_and_run(struct telemetry_dev *tdev)
 		return -EBUSY;
 	
 	/* Create and initialize kthread */
-	tdev->producer_thread = kthread_create(producer_thread_fn,(void *) tdev,"Producer_telemetry");
+	tdev->producer_thread = kthread_create(producer_thread_fn,
+						(void *) tdev,
+						"Producer_telemetry");
 	
 	if(IS_ERR(tdev->producer_thread))
 	{
@@ -191,7 +197,6 @@ static int telemetry_release(struct inode *filenode, struct file *dev_file)
 	if(tdev->producer_thread != NULL)
 	{
 		kthread_stop(tdev->producer_thread);
-		
 		tdev->producer_thread = NULL;
 	}
 	
@@ -230,6 +235,11 @@ static ssize_t telemetry_read(struct file *dev_file,
 	if(records_requested <=0)
 		return -EINVAL;
 		
+	//record the number of times consumer is blocked due to empty queue
+	// this may have some races
+	if (ring_empty(&tdev->buf))
+		telemetry_stats_consumer_blocked(&tdev->stats);
+		
 	// Block until data is available in the ring
 	ret = wait_event_interruptible(tdev->has_data_wq, 
 					!ring_empty(&tdev->buf) || READ_ONCE(tdev->shutdown_session));
@@ -255,8 +265,7 @@ static ssize_t telemetry_read(struct file *dev_file,
 		
 	while(idx< records_to_return)
 	{
-		ring_pop(&tdev->buf,&records[idx]); 
-		idx++;
+		ring_pop(&tdev->buf,&records[idx++]); 
 	}
 	// TODO: parameter type mismatch
 	telemetry_stats_consumed(&tdev->stats,records_to_return);
@@ -274,7 +283,7 @@ static ssize_t telemetry_read(struct file *dev_file,
 free_records:
 	kfree(records);
 	
-	
+
 	return ret;
 }
 
@@ -335,17 +344,18 @@ static int __init telemetry_dev_init(void)
 #else
 	tdev->telem_class = class_create("telemetry_rec");
 #endif
-	if(IS_ERR(tdev->telem_class))
-	{
+	if(IS_ERR(tdev->telem_class)) {
 		ret = PTR_ERR(tdev->telem_class);
 		goto del_cdev;
 	}
 	
 	// Device creation
-	tdev->device = device_create(tdev->telem_class, NULL, 
-					tdev->device_num, NULL, "telemetry_rec");
-	if (IS_ERR(tdev->device))
-	{
+	tdev->device = device_create(tdev->telem_class,
+					NULL, 
+					tdev->device_num,
+					NULL, 
+					"telemetry_rec");
+	if (IS_ERR(tdev->device)) {
 		ret = PTR_ERR(tdev->device);
 		goto class_del;
 	}
