@@ -1,11 +1,7 @@
 #pragma once
 
-#include <linux/wait.h>
-#include <linux/err.h>
-#include <linux/compiler.h>
-#include <linux/slab.h>
 #include <linux/types.h>
-//#include <linux/vmalloc.h>
+#include <linux/atomic.h>
 
 
 struct telemetry_record{

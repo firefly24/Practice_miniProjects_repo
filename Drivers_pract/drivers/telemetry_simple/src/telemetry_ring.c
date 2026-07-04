@@ -1,3 +1,7 @@
+#include <linux/compiler.h>
+#include <linux/slab.h>
+#include <linux/err.h>
+
 #include "telemetry_ring.h"
 
 
@@ -9,7 +13,7 @@ int ring_init(struct telemetry_ring_buf *buf, uint32_t capacity)
 	// Allocate buffer
 	if (!buf->records)
 	{
-		printk(KERN_ERR "Vmalloc failed to allocate ring buffer\n");
+		printk(KERN_ERR "Failed to allocate ring buffer\n");
 		return -ENOMEM;
 	}
 	
@@ -99,9 +103,7 @@ ssize_t ring_pop(struct telemetry_ring_buf *buf,struct telemetry_record *record)
 
 void ring_destroy(struct telemetry_ring_buf *buf)
 {
-
-	// TODO: how to wait for all dependent readers/writers to finish
-	if(buf->records != NULL)
+	if(!buf->records)
 		kfree(buf->records);
 	
 	buf->records = NULL;

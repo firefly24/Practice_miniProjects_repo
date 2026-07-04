@@ -1,3 +1,5 @@
+#include <linux/printk.h>
+#include <linux/minmax.h>
 #include "telemetry_stats.h"
 
 
@@ -84,8 +86,27 @@ void telemetry_stats_dump(struct telemetry_stats *stats)
 	printk(KERN_INFO "===========================\n");
 }
 
+void telemetry_stats_show(struct telemetry_stats *stats,struct seq_file *s)
+{
+	seq_printf(s,"Hello Telemetry!\n");
+	
+	seq_printf(s,"This is my first debugfs file.\n");
 
-
+	if(!stats)
+		return;
+	
+	seq_printf(s, "===========================\n");
+	seq_printf(s, "Telemetry Driver Statistics\n");
+	seq_printf(s, "___________________________\n");
+	seq_printf(s, "Records generated:\t %llu\n",stats->records_generated);
+	seq_printf(s, "Records consumed:\t %llu\n",stats->records_consumed);
+	seq_printf(s, "Records dropped:\t %llu\n",stats->records_dropped);
+	seq_printf(s, "Max occupancy seen so far:\t (%u / %u)\n",
+				stats->max_occupancy_seen, stats->ring_capacity);
+	seq_printf(s, "Producer blocked count:\t %llu\n",stats->producer_block_ctr);
+	seq_printf(s, "Consumer blocked count:\t %llu\n",stats->consumer_block_ctr);
+	seq_printf(s, "===========================\n");
+}
 
 
 

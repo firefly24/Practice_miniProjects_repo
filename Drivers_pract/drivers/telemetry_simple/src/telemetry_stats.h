@@ -1,8 +1,7 @@
 #pragma once
 
 #include <linux/types.h>
-#include <linux/printk.h>
-#include <linux/minmax.h>
+#include <linux/seq_file.h>
 
 
 struct telemetry_stats{
@@ -35,3 +34,5 @@ void telemetry_stats_dropped(struct telemetry_stats *stats);
 void telemetry_stats_max_occupancy(struct telemetry_stats *stats, uint32_t occupancy);
 
 void telemetry_stats_dump(struct telemetry_stats *stats);
+
+void telemetry_stats_show(struct telemetry_stats *stats,struct seq_file *s);

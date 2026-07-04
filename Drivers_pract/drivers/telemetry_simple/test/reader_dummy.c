@@ -46,7 +46,7 @@ int main(void)
 		{
 			printf("seq: %lu, value: %u\n",rec[i].seq_no, rec[i].value);
 		}
-		//sleep(2);
+		sleep(3);
 	}
 
 	return 0;

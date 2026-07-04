@@ -1,19 +1,16 @@
 #include <linux/module.h>
 #include <linux/kernel.h>
+#include <linux/version.h>
 #include <linux/init.h>
 #include <linux/err.h>
-#include <linux/cdev.h>
-#include <linux/device.h>
+
 #include <linux/slab.h>
 #include <linux/ktime.h>
 #include <linux/delay.h>
 #include <linux/sched.h>
-#include <linux/kthread.h>
-#include <linux/version.h>
 #include <linux/fs.h>
-#include <linux/spinlock.h>
-#include "telemetry_ring.h"
-#include "telemetry_stats.h"
+
+#include "telemetry_dev.h"
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("firelfy24");
@@ -21,46 +18,13 @@ MODULE_DESCRIPTION("Simple telemetry module for practice");
 
 #define PRODUCER_SLEEP_MS 1000
 
-struct telemetry_dev{
-	
-	// device related
-	dev_t device_num;
-	struct cdev cdev;
-	struct class *telem_class;
-	struct device *device;
-	
-	// buffer for data transfer
-	struct telemetry_ring_buf buf;
-	
-	/* buffer activity notification for producers/consumers */
-	wait_queue_head_t has_data_wq;
-	wait_queue_head_t has_space_wq;
-	
-	// producer related
-	struct task_struct *producer_thread;
-	
-
-	// Ownership and lifecycle tracking
-	bool shutdown_session;
-	bool has_owner;
-	spinlock_t ownership_lock;
-	
-	// device properties info
-	uint64_t seq_no;
-	
-	// Statistics for later measurements
-	struct telemetry_stats stats;
-};
-
 struct telemetry_dev *tdev;
-
 
 /*****************************************************************************/
  
 static int producer_thread_fn(void *data)
 {
 	struct telemetry_dev *tdev = data;
-	//struct telemetry_record *record;
 	struct telemetry_record record;
 	int ret=0;
 	
@@ -362,6 +326,9 @@ static int __init telemetry_dev_init(void)
 	
 	pr_info("Telemetry device created successfully\n");
 	
+	if (telemetry_dbgfs_init(tdev))
+		pr_warn("Failed to init debugfs attributes\n");
+	
 	return 0;
 	
 	/*cleanup path in case of init failure*/
@@ -386,6 +353,7 @@ static void __exit telemetry_dev_exit(void)
 {
 	if (!tdev) 
 		return;
+	telemetry_dbgfs_cleanup(tdev);
 	device_destroy(tdev->telem_class, tdev->device_num);
 	class_destroy(tdev->telem_class);
 	cdev_del(&tdev->cdev);
