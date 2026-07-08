@@ -30,3 +30,15 @@ telemetry_stats.c
     • Reporting - report the metrics on need basis
     
 ---
+
+## Updates: 
+
+### Telemetry V3.4: Deferred implementation of backpressure policy DELETE_OLD
+
+	For SPSC, when producer is faster than consumer, one of the possible backpressure policies is DELETE_OLD where older records are deleted to make space for new ones. 
+
+	To accomodate this policy, now the producer has to pop() old records then push() new records to the ring buffer. 
+
+	Invariant Violation: This breaks the core invariant of our current SPSC based design where producer is allowed to only modify buffer tail(push operation), and consumer allowed to modify head (pop operation). 
+	
+	Limition: With current design it is not possible to maintain ring correctness if producer and consumer both modify head without synchronization even for SPSC. We can implement this once synchronization is implement for ring buffer access 
