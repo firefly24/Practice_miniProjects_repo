@@ -11,6 +11,13 @@
 #include "telemetry_stats.h"
 #include "telemetry_debugfs.h"
 
+enum telemetry_backpressure_policy {
+	TELEMETRY_BP_BLOCK,
+	TELEMETRY_BP_DROP_NEW,
+	TELEMETRY_BP_DROP_OLD,
+	TELEMETRY_BP_MAX,
+};
+
 struct telemetry_dev{
 	
 	
@@ -36,8 +43,8 @@ struct telemetry_dev{
 	
 	/* Producer */
 	struct task_struct *producer_thread;
+	enum telemetry_backpressure_policy backpressure_policy;
 	
-
 	/* Session state - ownership and lifecycle */
 	bool shutdown_session;
 	bool has_owner;

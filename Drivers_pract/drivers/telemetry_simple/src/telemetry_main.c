@@ -21,6 +21,64 @@ MODULE_DESCRIPTION("Simple telemetry module for practice");
 struct telemetry_dev *tdev;
 
 /*****************************************************************************/
+
+static int telemetry_push_record(struct telemetry_dev *tdev, struct telemetry_record *record)
+{
+	int ret=0;
+
+	//record the number of times producer is blocked wating for queue space
+	// this may have some races
+	if (ring_full(&tdev->buf))
+	{
+		telemetry_stats_producer_blocked(&tdev->stats);
+		
+		switch(tdev->backpressure_policy)
+		{
+			case TELEMETRY_BP_BLOCK:
+			
+				// implement block producer policy here 
+				break;
+			
+			case TELEMETRY_BP_DROP_NEW:
+				// implement drop new records policy
+				break;
+			
+			case TELEMETRY_BP_DROP_OLD:
+				// implement drop old records policy
+				break;
+				
+			default:
+				break;
+		}
+		
+	}
+		
+	ret = wait_event_interruptible(tdev->has_space_wq,
+				!ring_full(&tdev->buf) || READ_ONCE(tdev->shutdown_session));
+	
+	// interuupted by a signal
+	if(ret)
+		return ret;
+		
+	if(READ_ONCE(tdev->shutdown_session))
+		return 0;
+
+	// push to ring buffer
+	if ( ring_push(&tdev->buf,record) == 0 )
+	{
+		// TODO: type mismatch between occupancy parameter 
+		telemetry_stats_generated(&tdev->stats);
+		telemetry_stats_max_occupancy(&tdev->stats,records_available(&tdev->buf));
+		wake_up_interruptible(&tdev->has_data_wq);
+		
+		pr_info("Successfully pushed: %llu\n",record->seq_no );	
+	}
+	else
+	{
+		pr_info("Failed to push%llu\n",record->seq_no);
+	}
+	return 0;
+}
  
 static int producer_thread_fn(void *data)
 {
@@ -43,35 +101,7 @@ static int producer_thread_fn(void *data)
 		record.timestamp_ms = ktime_to_ms(ktime_get());
 		record.value = 42;
 		
-		//record the number of times producer is blocked wating for queue space
-		// this may have some races
-		if (ring_full(&tdev->buf))
-			telemetry_stats_producer_blocked(&tdev->stats);
-			
-		ret = wait_event_interruptible(tdev->has_space_wq,
-					!ring_full(&tdev->buf) || READ_ONCE(tdev->shutdown_session));
-		
-		// interuupted by a signal
-		if(ret)
-			return ret;
-			
-		if(READ_ONCE(tdev->shutdown_session))
-			return 0;
-		
-		// push to ring buffer
-		if ( ring_push(&tdev->buf,&record) == 0 )
-		{
-			// TODO: type mismatch between occupancy parameter 
-			telemetry_stats_generated(&tdev->stats);
-			telemetry_stats_max_occupancy(&tdev->stats,records_available(&tdev->buf));
-			wake_up_interruptible(&tdev->has_data_wq);
-			
-			pr_info("Successfully pushed: %llu\n",record.seq_no );	
-		}
-		else
-		{
-			pr_info("Failed to push%llu\n",record.seq_no);
-		}
+		ret = telemetry_push_record(tdev,&record);
 		
 		//sleep 
 		msleep(PRODUCER_SLEEP_MS);
@@ -287,6 +317,7 @@ static int __init telemetry_dev_init(void)
 	init_waitqueue_head(&tdev->has_space_wq);
 	WRITE_ONCE(tdev->shutdown_session,false);
 	telemetry_stats_init(&tdev->stats,capacity);
+	tdev->backpressure_policy = TELEMETRY_BP_BLOCK;
 		
 	/* Initialize char device file */
 	

@@ -5,6 +5,12 @@
 #include "telemetry_ring.h"
 
 
+/** INVARIANTS 
+1. Current ring design is valid for SPSC model only, it will break for multiple readers/writers 
+2. Producer pushes new record at tail, so only producer is allowed to modify buffer tail through push
+3. Consumer can only pop from ring, so head should only be modified by consumer
+*/
+
 int ring_init(struct telemetry_ring_buf *buf, uint32_t capacity)
 {	
 	//buf->records = vmalloc(sizeof(struct telemetry_record) * (capacity+1));

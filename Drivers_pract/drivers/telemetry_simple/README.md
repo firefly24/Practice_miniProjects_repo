@@ -7,6 +7,12 @@ Producer -> Telemetry module -> Buffering -> Synchronization -> Userspace consum
 
 ##Submodules and their responsibilities
 ---
+
+
+Ring Buffer - provides storage mechanism for generated records
+Telemetry Device - owns operational policies
+
+
 telemetry_main.c
     • Device lifecycle - char device init/exit 
     • Session management - each telemetry session starts with fops.open() and ends with fops.release()
