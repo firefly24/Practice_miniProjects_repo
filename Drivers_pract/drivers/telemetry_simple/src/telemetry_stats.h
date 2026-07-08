@@ -5,7 +5,7 @@
 
 
 struct telemetry_stats{
-	uint64_t records_generated;
+	uint64_t records_generated;	// number of records successfully accepted into the ring
 	uint64_t records_consumed;
 	uint64_t records_dropped;
 	

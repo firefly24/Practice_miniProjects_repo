@@ -16,7 +16,11 @@ MODULE_LICENSE("GPL");
 MODULE_AUTHOR("firelfy24");
 MODULE_DESCRIPTION("Simple telemetry module for practice");
 
-#define PRODUCER_SLEEP_MS 1000
+static int bp_policy = TELEMETRY_BP_BLOCK;
+module_param(bp_policy, int,0644);
+MODULE_PARM_DESC(bp_policy, "Set backpressure policy for ring overflow");
+
+#define PRODUCER_SLEEP_MS 100
 
 struct telemetry_dev *tdev;
 
@@ -37,31 +41,33 @@ static int telemetry_push_record(struct telemetry_dev *tdev, struct telemetry_re
 			case TELEMETRY_BP_BLOCK:
 			
 				// implement block producer policy here 
+				ret = wait_event_interruptible(tdev->has_space_wq,
+				!ring_full(&tdev->buf) || READ_ONCE(tdev->shutdown_session));
+				
+				// interuupted by a signal
+				if(ret)
+					return ret;
+		
+				if(READ_ONCE(tdev->shutdown_session))
+					return 0;
 				break;
 			
 			case TELEMETRY_BP_DROP_NEW:
 				// implement drop new records policy
-				break;
+				telemetry_stats_dropped(&tdev->stats);
+				pr_info("DROP_NEW: incoming record discarded\n");
+				return 0;
 			
 			case TELEMETRY_BP_DROP_OLD:
 				// implement drop old records policy
-				break;
+				// TODO - to be implementated later after adding ring synchronization
+				return -ENOTSUPP;
 				
 			default:
-				break;
-		}
-		
+				pr_err("Invalid backpressure policy selected\n");
+				return -EINVAL;
+		}	
 	}
-		
-	ret = wait_event_interruptible(tdev->has_space_wq,
-				!ring_full(&tdev->buf) || READ_ONCE(tdev->shutdown_session));
-	
-	// interuupted by a signal
-	if(ret)
-		return ret;
-		
-	if(READ_ONCE(tdev->shutdown_session))
-		return 0;
 
 	// push to ring buffer
 	if ( ring_push(&tdev->buf,record) == 0 )
@@ -75,7 +81,7 @@ static int telemetry_push_record(struct telemetry_dev *tdev, struct telemetry_re
 	}
 	else
 	{
-		pr_info("Failed to push%llu\n",record->seq_no);
+		pr_err("Failed to push%llu\n",record->seq_no);
 	}
 	return 0;
 }
@@ -297,6 +303,12 @@ static int __init telemetry_dev_init(void)
 {
 	int ret=0;
 	uint32_t capacity = 5;
+
+	if(bp_policy < 0 || bp_policy >= TELEMETRY_BP_MAX)
+	{
+		pr_err("Please select valid backpressure policy\n");
+		return -EINVAL;
+	}
 	
 	tdev = kzalloc(sizeof(struct telemetry_dev),GFP_KERNEL);
 	if (!tdev)
@@ -317,7 +329,7 @@ static int __init telemetry_dev_init(void)
 	init_waitqueue_head(&tdev->has_space_wq);
 	WRITE_ONCE(tdev->shutdown_session,false);
 	telemetry_stats_init(&tdev->stats,capacity);
-	tdev->backpressure_policy = TELEMETRY_BP_BLOCK;
+	tdev->backpressure_policy = bp_policy;
 		
 	/* Initialize char device file */
 	

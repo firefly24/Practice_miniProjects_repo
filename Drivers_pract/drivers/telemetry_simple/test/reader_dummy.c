@@ -46,54 +46,9 @@ int main(void)
 		{
 			printf("seq: %lu, value: %u\n",rec[i].seq_no, rec[i].value);
 		}
-		sleep(3);
+		sleep(1);
 	}
 
 	return 0;
 }
 
-/*
-
-#include "../telemetry_ring.h"
-
-void test_push_pop(void)
-{
-	int capacity,i=0;
-	struct telemetry_record *record;
-	
-	record = kzalloc(sizeof(struct telemetry_record), GFP_KERNEL);
-	
-	if(!record)
-		return ;//-ENOMEM;
-		
-	capacity= tdev->buf.capacity;
-	
-	for (i=0;i<=capacity;i++)
-	{
-		record->value = i *10;
-		record->seq_no = i;
-		record->timestamp_ms = 0;
-		if(ring_push(&tdev->buf,record))
-		{
-			printk(KERN_INFO "Fail insert %d\n",i);
-		}
-	}
-	
-	for(i=0;i<=capacity;i++)
-	{
-		if ( ring_pop(&tdev->buf,record) == 0 )
-		{
-			printk(KERN_INFO "Successfully popped: %d\n",record->value );
-		}
-		else
-		{
-			printk(KERN_INFO "Failed to pop%d\n",i);
-		}
-	
-	}
-	
-	kfree(record);
-	
-	return;
-}
-*/

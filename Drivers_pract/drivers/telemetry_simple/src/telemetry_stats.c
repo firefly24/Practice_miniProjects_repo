@@ -47,7 +47,7 @@ void telemetry_stats_consumed(struct telemetry_stats *stats,uint32_t count)
 /* Not used as of now, as we don't have any dropping strategy yet */
 void telemetry_stats_dropped(struct telemetry_stats *stats)
 {
-
+	stats->records_dropped++;
 }
 
 void telemetry_stats_max_occupancy(struct telemetry_stats *stats, uint32_t occupancy)
