@@ -13,7 +13,6 @@
 
 int ring_init(struct telemetry_ring_buf *buf, uint32_t capacity)
 {	
-	//buf->records = vmalloc(sizeof(struct telemetry_record) * (capacity+1));
 	buf->records = kcalloc(capacity+1, sizeof(struct telemetry_record), GFP_KERNEL);
 	
 	// Allocate buffer
@@ -23,7 +22,6 @@ int ring_init(struct telemetry_ring_buf *buf, uint32_t capacity)
 		return -ENOMEM;
 	}
 	
-	//buf->buf_size = 0;
 	buf->capacity = capacity+1;
 	ring_reset(buf);
 
@@ -52,12 +50,9 @@ bool ring_empty(struct telemetry_ring_buf *buf)
 
 
 
-ssize_t ring_push(struct telemetry_ring_buf *buf,struct telemetry_record *record)
+int ring_push(struct telemetry_ring_buf *buf,struct telemetry_record *record)
 {
 	uint32_t next_tail;
-
-	// TODO: how do we trigger push from producer when space is available
-	
 	
 	// fail push if no space on ring buffer
 	if(ring_full(buf))
@@ -73,19 +68,16 @@ ssize_t ring_push(struct telemetry_ring_buf *buf,struct telemetry_record *record
 	WRITE_ONCE(buf->write_idx,next_tail);
 	atomic_inc(&buf->available_records);
 	
-	// TODO: who will notify that new data is available now 
-	
 	return 0;
 }
 
 
-ssize_t records_available(struct telemetry_ring_buf *buf)
+size_t records_available(struct telemetry_ring_buf *buf)
 {
 	return atomic_read(&buf->available_records);
-	//return 0;
 }
 
-ssize_t ring_pop(struct telemetry_ring_buf *buf,struct telemetry_record *record)
+int ring_pop(struct telemetry_ring_buf *buf,struct telemetry_record *record)
 {
 	uint32_t next_head ;
 	// TODO: how to we flush entire buffer instead of single record
@@ -102,17 +94,19 @@ ssize_t ring_pop(struct telemetry_ring_buf *buf,struct telemetry_record *record)
 	WRITE_ONCE(buf->read_idx, next_head);
 	atomic_dec(&buf->available_records);
 	
-	//TODO: who will inform that free space is available now
-	
 	return 0;
 }
 
 void ring_destroy(struct telemetry_ring_buf *buf)
 {
-	if(!buf->records)
+	if(buf->records)
 		kfree(buf->records);
 	
 	buf->records = NULL;
+	buf->capacity =0;
+	atomic_set(&buf->available_records,0);
+	buf->read_idx = 0;
+	buf->write_idx = 0;
 }
 
 

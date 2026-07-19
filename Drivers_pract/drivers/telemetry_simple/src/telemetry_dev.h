@@ -8,8 +8,11 @@
 #include <linux/wait.h>
 
 #include "telemetry_ring.h"
+#include "telemetry_producer.h"
 #include "telemetry_stats.h"
 #include "telemetry_debugfs.h"
+
+#define PRODUCER_SLEEP_MS 100
 
 enum telemetry_backpressure_policy {
 	TELEMETRY_BP_BLOCK,
@@ -42,7 +45,8 @@ struct telemetry_dev{
 	wait_queue_head_t has_space_wq;
 	
 	/* Producer */
-	struct task_struct *producer_thread;
+	//struct task_struct *producer_thread;
+	struct telemetry_producer producer;
 	enum telemetry_backpressure_policy backpressure_policy;
 	
 	/* Session state - ownership and lifecycle */
@@ -50,15 +54,15 @@ struct telemetry_dev{
 	bool has_owner;
 	spinlock_t ownership_lock;
 	
-	/* Device properties */
-	uint64_t seq_no;
-	
 	/* Driver statistics */
 	struct telemetry_stats stats;
 	
 	/* DebugFS */
 	struct telemetry_dbgfs dbgfs;
 };
+
+
+int telemetry_push_record(struct telemetry_dev *tdev, struct telemetry_record *record);
 
 
 

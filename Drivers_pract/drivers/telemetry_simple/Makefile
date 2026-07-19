@@ -1,6 +1,6 @@
 obj-m := simple_telemetry_drv.o
 
-simple_telemetry_drv-objs := src/telemetry_main.o src/telemetry_stats.o src/telemetry_ring.o src/telemetry_debugfs.o
+simple_telemetry_drv-objs := src/telemetry_main.o src/telemetry_stats.o src/telemetry_ring.o src/telemetry_debugfs.o src/telemetry_producer.o
 
 kernel_header_path := /lib/modules/$(shell uname -r)/build
 

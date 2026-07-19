@@ -15,7 +15,7 @@ struct telemetry_ring_buf{
 
 	struct telemetry_record *records;
 	//uint32_t buf_size;
-	uint32_t capacity;
+	uint32_t capacity; // One slot is intentionally left unused to distinguish full and empty conditions
 	
 	/* ring buffer indexing*/
 	uint32_t read_idx;	// head of ring buffer 
@@ -35,12 +35,12 @@ bool ring_empty(struct telemetry_ring_buf *buf);
 
 void ring_reset(struct telemetry_ring_buf *buf);
 
-ssize_t records_available(struct telemetry_ring_buf *buf);
+size_t records_available(struct telemetry_ring_buf *buf);
 
-ssize_t ring_push(struct telemetry_ring_buf *buf,
+int ring_push(struct telemetry_ring_buf *buf,
 		struct telemetry_record *record);
 
-ssize_t ring_pop(struct telemetry_ring_buf *buf,
+int ring_pop(struct telemetry_ring_buf *buf,
 		struct telemetry_record *record);
 
 void ring_destroy(struct telemetry_ring_buf *buf);

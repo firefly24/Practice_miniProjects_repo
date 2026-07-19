@@ -5,9 +5,6 @@
 #include <linux/err.h>
 
 #include <linux/slab.h>
-#include <linux/ktime.h>
-#include <linux/delay.h>
-#include <linux/sched.h>
 #include <linux/fs.h>
 
 #include "telemetry_dev.h"
@@ -20,15 +17,26 @@ static int bp_policy = TELEMETRY_BP_BLOCK;
 module_param(bp_policy, int,0644);
 MODULE_PARM_DESC(bp_policy, "Set backpressure policy for ring overflow");
 
-#define PRODUCER_SLEEP_MS 100
+
+/** Invariants: 
+- Init producer always after ring buffer allocation, and stop producer before ring free	
+*/ 
 
 struct telemetry_dev *tdev;
 
 /*****************************************************************************/
 
-static int telemetry_push_record(struct telemetry_dev *tdev, struct telemetry_record *record)
+
+/*Since record push will be done by producer module, it cannot be static anymore. So any other program can attempt to call this directly without any producer, how to handle the security here? */
+int telemetry_push_record(struct telemetry_dev *tdev, struct telemetry_record *record)
 {
 	int ret=0;
+	
+	if (!tdev->buf.records)
+	{
+		pr_err("Illegal push before buffer initialzed!\n");
+		return -EPERM;
+	}
 
 	//record the number of times producer is blocked wating for queue space
 	// this may have some races
@@ -70,79 +78,23 @@ static int telemetry_push_record(struct telemetry_dev *tdev, struct telemetry_re
 	}
 
 	// push to ring buffer
-	if ( ring_push(&tdev->buf,record) == 0 )
-	{
-		// TODO: type mismatch between occupancy parameter 
-		telemetry_stats_generated(&tdev->stats);
-		telemetry_stats_max_occupancy(&tdev->stats,records_available(&tdev->buf));
-		wake_up_interruptible(&tdev->has_data_wq);
-		
-		pr_info("Successfully pushed: %llu\n",record->seq_no );	
-	}
-	else
+	ret = ring_push(&tdev->buf,record);
+	if(ret)
 	{
 		pr_err("Failed to push%llu\n",record->seq_no);
+		return ret;
 	}
+	
+	// TODO: type mismatch between occupancy parameter 
+	telemetry_stats_generated(&tdev->stats);
+	telemetry_stats_max_occupancy(&tdev->stats,records_available(&tdev->buf));
+	wake_up_interruptible(&tdev->has_data_wq);
+	
+	pr_info("Successfully pushed: %llu\n",record->seq_no );	
+	
 	return 0;
 }
  
-static int producer_thread_fn(void *data)
-{
-	struct telemetry_dev *tdev = data;
-	struct telemetry_record record;
-	int ret=0;
-	
-	if(!data)
-		return -EINVAL;
-		
-	if (tdev->buf.records == NULL)
-		return -EINVAL;
-	
-	pr_info("Starting Producer thread\n");
-	
-	while(!kthread_should_stop())
-	{
-		// generate record
-		record.seq_no = tdev->seq_no++;
-		record.timestamp_ms = ktime_to_ms(ktime_get());
-		record.value = 42;
-		
-		ret = telemetry_push_record(tdev,&record);
-		
-		//sleep 
-		msleep(PRODUCER_SLEEP_MS);
-	}
-	
-	pr_info("Stopped producer thread\n");
-	
-	return ret;
-}
-
-int producer_thread_set_and_run(struct telemetry_dev *tdev)
-{
-	int ret= 0;
-	
-	if (tdev->producer_thread)
-		return -EBUSY;
-	
-	/* Create and initialize kthread */
-	tdev->producer_thread = kthread_create(producer_thread_fn,
-						(void *) tdev,
-						"Producer_telemetry");
-	
-	if(IS_ERR(tdev->producer_thread))
-	{
-		ret = PTR_ERR(tdev->producer_thread);
-		tdev->producer_thread = NULL;
-		return ret ;
-	}
-	
-	/* run the producer thread */
-	wake_up_process(tdev->producer_thread);
-	
-	return 0;
-}
-
 
 /*****************************************************************************/
 
@@ -174,12 +126,14 @@ static int telemetry_open(struct inode *filenode, struct file *dev_file)
 	pr_info("Open: Acquired telemetry device ownership\n");
 	
 	/* Run the producer thread after taking ownership*/
-	if ( (ret = producer_thread_set_and_run(tdev)) )
+	if ( (ret = telemetry_producer_start(&tdev->producer)) )
 	{
 		// release ownership if producer thread fails
 		spin_lock(&tdev->ownership_lock);
 		tdev->has_owner = false;
 		spin_unlock(&tdev->ownership_lock);
+		
+		pr_err("Producer launch failed! Abort session!\n");
 	}
 	
 	return ret;
@@ -194,11 +148,7 @@ static int telemetry_release(struct inode *filenode, struct file *dev_file)
 	wake_up_all(&tdev->has_space_wq);
 	
 	/* stop producer thread and complete work before releasing ownership*/
-	if(tdev->producer_thread != NULL)
-	{
-		kthread_stop(tdev->producer_thread);
-		tdev->producer_thread = NULL;
-	}
+	telemetry_producer_stop(&tdev->producer);
 	
 	ring_reset(&tdev->buf);
 	
@@ -242,7 +192,8 @@ static ssize_t telemetry_read(struct file *dev_file,
 		
 	// Block until data is available in the ring
 	ret = wait_event_interruptible(tdev->has_data_wq, 
-					!ring_empty(&tdev->buf) || READ_ONCE(tdev->shutdown_session));
+						!ring_empty(&tdev->buf) 
+						|| READ_ONCE(tdev->shutdown_session));
 	
 	// Read interrupted by a signal
 	if(ret)
@@ -275,6 +226,8 @@ static ssize_t telemetry_read(struct file *dev_file,
 	ret = copy_to_user(user_buf,records,bytes_to_copy);
 	if(ret)
 	{
+		// records popped successfully from queue, but failed to deliver to consumer
+		// those records will be lost forever, (no peek semantics)
 		ret = -EFAULT;
 		goto free_records;
 	}
@@ -283,7 +236,6 @@ static ssize_t telemetry_read(struct file *dev_file,
 free_records:
 	kfree(records);
 	
-
 	return ret;
 }
 
@@ -321,10 +273,10 @@ static int __init telemetry_dev_init(void)
 		goto free_dev;
 	
 	/* zero initialize values needed in open() call */
-	tdev->producer_thread = NULL;
+	
+	telemetry_producer_init(&tdev->producer,tdev);
 	tdev->has_owner = false;
 	spin_lock_init(&tdev->ownership_lock);
-	tdev->seq_no = 0;
 	init_waitqueue_head(&tdev->has_data_wq);
 	init_waitqueue_head(&tdev->has_space_wq);
 	WRITE_ONCE(tdev->shutdown_session,false);
@@ -402,8 +354,7 @@ static void __exit telemetry_dev_exit(void)
 	cdev_del(&tdev->cdev);
 	unregister_chrdev_region(tdev->device_num,1);
 	
-	if (tdev->producer_thread != NULL)	
-		kthread_stop(tdev->producer_thread);
+	telemetry_producer_stop(&tdev->producer);
 	ring_destroy(&tdev->buf);
 	kfree(tdev);
 	
