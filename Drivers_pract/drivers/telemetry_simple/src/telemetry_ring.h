@@ -2,6 +2,7 @@
 
 #include <linux/types.h>
 #include <linux/atomic.h>
+#include <linux/spinlock.h>
 
 
 struct telemetry_record{
@@ -21,9 +22,21 @@ struct telemetry_ring_buf{
 	uint32_t read_idx;	// head of ring buffer 
 	uint32_t write_idx;	// tail of ring buffer
 	
+	
+	/*
+	 * available_records is currently maintained explicitly for
+	 * debugging, statistics and validation.
+	 *
+	 * Revisit after concurrency implementation is stable to determine
+	 * whether it should remain or be derived from read_idx/write_idx.
+	 */
 	atomic_t available_records;
 	
 	// TODO: how do we track if current ring buffer is to be destroyed
+	
+	/* Synchronization for concurrent buffer access*/
+	spinlock_t push_lock;
+	
 };
 
 

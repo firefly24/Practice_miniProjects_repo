@@ -22,6 +22,7 @@ int ring_init(struct telemetry_ring_buf *buf, uint32_t capacity)
 		return -ENOMEM;
 	}
 	
+	spin_lock_init(&buf->push_lock);
 	buf->capacity = capacity+1;
 	ring_reset(buf);
 
@@ -53,22 +54,29 @@ bool ring_empty(struct telemetry_ring_buf *buf)
 int ring_push(struct telemetry_ring_buf *buf,struct telemetry_record *record)
 {
 	uint32_t next_tail;
+	int ret =0;
+	
+	spin_lock(&buf->push_lock);
 	
 	// fail push if no space on ring buffer
-	if(ring_full(buf))
-		return -ENOSPC;
+	if(ring_full(buf)) {
+		ret = -ENOSPC;
+		goto unlock;
+	}
 	
 	// TODO: how do we construct record in place in the allocated buffer instead of copying already constructed buffer
 	
-	// copy new record to ring		
+	// copy new record to ring, keeping it inside spinlock as records are small or now		
 	buf->records[buf->write_idx] = *record;
 	
 	// publish record and increment index
 	next_tail = (buf->write_idx+1)%buf->capacity;
 	WRITE_ONCE(buf->write_idx,next_tail);
 	atomic_inc(&buf->available_records);
-	
-	return 0;
+
+unlock:	
+	spin_unlock(&buf->push_lock);
+	return ret;
 }
 
 

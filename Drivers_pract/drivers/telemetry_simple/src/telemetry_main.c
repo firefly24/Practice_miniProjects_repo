@@ -38,11 +38,19 @@ int telemetry_push_record(struct telemetry_dev *tdev, struct telemetry_record *r
 		return -EPERM;
 	}
 
-	//record the number of times producer is blocked wating for queue space
-	// this may have some races
-	if (ring_full(&tdev->buf))
-	{
+	
+	while( (ret = ring_push(&tdev->buf,record)) )
+	{	
+		//record the number of times producer is blocked wating for queue space
 		telemetry_stats_producer_blocked(&tdev->stats);
+		
+		if (ret != -ENOSPC) 
+		{
+			pr_err("Failed to push%llu, reason: %u \n",record->seq_no,ret);
+			return ret;
+		}
+		
+		// Ring is full if push return ENOSPC, apply backpressure
 		
 		switch(tdev->backpressure_policy)
 		{
@@ -77,13 +85,7 @@ int telemetry_push_record(struct telemetry_dev *tdev, struct telemetry_record *r
 		}	
 	}
 
-	// push to ring buffer
-	ret = ring_push(&tdev->buf,record);
-	if(ret)
-	{
-		pr_err("Failed to push%llu\n",record->seq_no);
-		return ret;
-	}
+	// push to ring buffer is successful
 	
 	// TODO: type mismatch between occupancy parameter 
 	telemetry_stats_generated(&tdev->stats);
