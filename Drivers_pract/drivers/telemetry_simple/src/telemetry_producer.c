@@ -4,6 +4,7 @@
 #include <linux/ktime.h>
 #include <linux/sched.h>
 #include <linux/delay.h>
+#include <linux/atomic.h>
 
 #include "telemetry_producer.h"
 #include "telemetry_dev.h"
@@ -11,6 +12,10 @@
 
 /* TODO: reconsider moving this responsibiltiy to telemetry_main*/
 static uint32_t producers=0;
+
+static atomic_t active_producers = ATOMIC_INIT(0);
+
+//static int failed_producers = 0;
 
 void telemetry_producer_init(struct telemetry_producer *producer,struct telemetry_dev *tdev)
 {
@@ -20,7 +25,7 @@ void telemetry_producer_init(struct telemetry_producer *producer,struct telemetr
 	producer->thread = NULL;
 	producer->seq_no = 0;
 	producer->parent = tdev;
-	producer->id = producers++;
+	producer->id = producers++; // Provide better id setting mechanism later
 }
 
 static void producer_generate_record ( struct telemetry_producer *producer, 
@@ -43,11 +48,17 @@ static int producer_thread_fn(void *data)
 		return -EINVAL;
 	
 	pr_info("Starting Producer thread\n");
+	atomic_inc(&active_producers);
 	
 	while(!kthread_should_stop())
 	{
 		producer_generate_record(producer,&record);
 		
+		/*
+		 * TODO: what kind of failures am I expecting here?
+		 * Is it really fatal that thread exit is needed?
+		 * Evaluate this return condition later.
+		 */
 		if ( (ret = telemetry_push_record(producer->parent,&record)) )
 			break;
 		
@@ -55,6 +66,7 @@ static int producer_thread_fn(void *data)
 		msleep(PRODUCER_SLEEP_MS);
 	}
 	
+	atomic_dec(&active_producers);
 	pr_info("Stopped producer thread\n");
 	
 	return ret;
@@ -92,6 +104,11 @@ void telemetry_producer_stop(struct telemetry_producer *producer)
 		kthread_stop(producer->thread);
 		producer->thread = NULL;
 	}
+}
+
+int telemetry_active_producers()
+{
+	return atomic_read(&active_producers);
 }
 
 

@@ -13,6 +13,9 @@
 #include "telemetry_debugfs.h"
 
 #define PRODUCER_SLEEP_MS 100
+#define RING_BUF_CAPACITY 5
+#define DEFAULT_PRODUCERS_COUNT 16
+#define MAX_PRODUCERS_COUNT
 
 enum telemetry_backpressure_policy {
 	TELEMETRY_BP_BLOCK,
@@ -45,8 +48,9 @@ struct telemetry_dev{
 	wait_queue_head_t has_space_wq;
 	
 	/* Producer */
-	//struct task_struct *producer_thread;
-	struct telemetry_producer producer;
+	struct telemetry_producer *producers;
+	uint32_t producer_count;
+	
 	enum telemetry_backpressure_policy backpressure_policy;
 	
 	/* Session state - ownership and lifecycle */

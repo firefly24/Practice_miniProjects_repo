@@ -14,6 +14,8 @@ struct telemetry_producer {
 	struct telemetry_dev *parent;
 	
 	uint64_t seq_no;
+	
+	bool is_active;
 };
 
 void telemetry_producer_init(struct telemetry_producer *producer,struct telemetry_dev *tdev);
@@ -21,4 +23,6 @@ void telemetry_producer_init(struct telemetry_producer *producer,struct telemetr
 int telemetry_producer_start(struct telemetry_producer *producer);
 
 void telemetry_producer_stop(struct telemetry_producer *producer);
+
+int telemetry_active_producers(void);
 

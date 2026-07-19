@@ -24,6 +24,61 @@ MODULE_PARM_DESC(bp_policy, "Set backpressure policy for ring overflow");
 
 struct telemetry_dev *tdev;
 
+
+/*****************************************************************************/
+
+static int producers_allocate(struct telemetry_dev *tdev, int producer_count)
+{
+	if (producer_count <=0)
+	{
+		pr_err("Invalid Producer count: %d\n", producer_count);
+		return -EINVAL;
+	}
+	
+	tdev->producers = kcalloc(producer_count,sizeof(struct telemetry_producer), GFP_KERNEL);
+
+	if (!tdev->producers)
+	{
+		pr_err("Failed to allocate producers!\n");
+		return -ENOMEM;
+	}
+	tdev->producer_count  = producer_count;
+	return 0;
+}
+
+static void init_producers(struct telemetry_dev *tdev)
+{
+	int producer = 0;
+	for (producer = 0; producer < tdev->producer_count; producer++)
+		telemetry_producer_init(&tdev->producers[producer],tdev);
+}
+
+static void producers_stop(struct telemetry_dev *tdev)
+{
+	/* telemetry_producer_stop is state safe, 
+	it is safe to call on initialized and uninitialized thread
+	*/ 
+	int producer = 0;
+	for (producer = 0; producer < tdev->producer_count; producer++)
+		telemetry_producer_stop(&tdev->producers[producer]);
+}
+
+static int producers_start(struct telemetry_dev *tdev)
+{
+	int producer = 0;
+	int ret = 0;
+	for(producer = 0; producer < tdev->producer_count; producer++)
+	{
+		if ( (ret = telemetry_producer_start(&tdev->producers[producer])) )
+		{
+			producers_stop(tdev);
+			break;
+		}
+	}
+	
+	return ret;
+}
+
 /*****************************************************************************/
 
 
@@ -100,6 +155,47 @@ int telemetry_push_record(struct telemetry_dev *tdev, struct telemetry_record *r
 
 /*****************************************************************************/
 
+static int take_ownership(struct telemetry_dev *tdev,struct file *dev_file)
+{
+	int ret = 0;
+	spin_lock(&tdev->ownership_lock);
+			
+	if (tdev->has_owner)
+	{
+		pr_err( "Device is already opened by another process\n");
+		ret = -EBUSY;
+		goto unlock;
+	}
+	
+	dev_file->private_data = tdev;
+	tdev->has_owner = true;
+unlock:
+	spin_unlock(&tdev->ownership_lock);
+	return ret;
+}
+
+static void release_ownership(struct telemetry_dev *tdev)
+{
+	spin_lock(&tdev->ownership_lock);
+	tdev->has_owner = false;
+	spin_unlock(&tdev->ownership_lock);
+}
+
+static void session_prepare(struct telemetry_dev *tdev)
+{
+	WRITE_ONCE(tdev->shutdown_session,false);
+	ring_reset(&tdev->buf);
+	telemetry_stats_reset(&tdev->stats);
+	init_producers(tdev);
+}
+
+static void session_cleanup(struct telemetry_dev *tdev)
+{
+	WRITE_ONCE(tdev->shutdown_session,true);
+	wake_up_all(&tdev->has_data_wq);
+	wake_up_all(&tdev->has_space_wq);
+}
+
 static int telemetry_open(struct inode *filenode, struct file *dev_file)
 {
 	/* Setup and run producer thread here */
@@ -108,36 +204,22 @@ static int telemetry_open(struct inode *filenode, struct file *dev_file)
 						struct telemetry_dev,cdev);
 	
 	/* Take ownership if device not already owned/opened*/			
-	spin_lock(&tdev->ownership_lock);		
-	if (tdev->has_owner)
-	{
-		spin_unlock(&tdev->ownership_lock);
-		pr_err( "Device is already opened by another process\n");
-		return -EBUSY;
-	}
+	if ( (ret = take_ownership(tdev,dev_file)) )
+		return ret;
 	
-	dev_file->private_data = tdev;
-	tdev->has_owner = true;
-	
-	spin_unlock(&tdev->ownership_lock);
-	
-	WRITE_ONCE(tdev->shutdown_session,false);
-	
-	telemetry_stats_reset(&tdev->stats);
-	
-	pr_info("Open: Acquired telemetry device ownership\n");
+	/* reset the device state and resources for this session*/
+	session_prepare(tdev);
 	
 	/* Run the producer thread after taking ownership*/
-	if ( (ret = telemetry_producer_start(&tdev->producer)) )
+	if( (ret = producers_start(tdev)) )
 	{
 		// release ownership if producer thread fails
-		spin_lock(&tdev->ownership_lock);
-		tdev->has_owner = false;
-		spin_unlock(&tdev->ownership_lock);
-		
+		release_ownership(tdev);
 		pr_err("Producer launch failed! Abort session!\n");
+		return ret;
 	}
 	
+	pr_info("Open: Acquired telemetry device ownership\n");
 	return ret;
 }
 
@@ -145,23 +227,16 @@ static int telemetry_release(struct inode *filenode, struct file *dev_file)
 {
 	struct telemetry_dev *tdev = dev_file->private_data;
 	
-	WRITE_ONCE(tdev->shutdown_session,true);
-	wake_up_all(&tdev->has_data_wq);
-	wake_up_all(&tdev->has_space_wq);
+	session_cleanup(tdev);
 	
 	/* stop producer thread and complete work before releasing ownership*/
-	telemetry_producer_stop(&tdev->producer);
-	
-	ring_reset(&tdev->buf);
+	producers_stop(tdev);
 	
 	// let's dump session stats before releasing session
 	telemetry_stats_dump(&tdev->stats);
 	
 	/* release ownership of device */
-	spin_lock(&tdev->ownership_lock);
-	tdev->has_owner = false;
-	spin_unlock(&tdev->ownership_lock);
-	
+	release_ownership(tdev);
 	pr_info("Released telemetry device ownership\n");
 	
 	return 0;
@@ -215,11 +290,9 @@ static ssize_t telemetry_read(struct file *dev_file,
 		return -ENOMEM;
 
 	// TODO: How to avoid multiple copies of record data here
-		
 	while(idx< records_to_return)
-	{
 		ring_pop(&tdev->buf,&records[idx++]); 
-	}
+	
 	// TODO: parameter type mismatch
 	telemetry_stats_consumed(&tdev->stats,records_to_return);
 	wake_up_interruptible(&tdev->has_space_wq);
@@ -252,11 +325,10 @@ static const struct file_operations telemetry_drv_fops = {
 
  /*****************************************************************************/
 
-
 static int __init telemetry_dev_init(void)
 {
 	int ret=0;
-	uint32_t capacity = 5;
+	//uint32_t capacity = 5;
 
 	if(bp_policy < 0 || bp_policy >= TELEMETRY_BP_MAX)
 	{
@@ -271,25 +343,29 @@ static int __init telemetry_dev_init(void)
 	pr_info("Telemetry_init\n");
 		
 	/* Create and initialize ring buffer for telemetry records */
-	if ((ret = ring_init(&tdev->buf, capacity)) )
+	if ((ret = ring_init(&tdev->buf, RING_BUF_CAPACITY)) )
 		goto free_dev;
+		
+	if ( (ret = producers_allocate(tdev,DEFAULT_PRODUCERS_COUNT)) )
+		goto free_ring_buf;
 	
 	/* zero initialize values needed in open() call */
 	
-	telemetry_producer_init(&tdev->producer,tdev);
+	//telemetry_producer_init(&tdev->producer,tdev);
+	//init_producers(tdev);
 	tdev->has_owner = false;
 	spin_lock_init(&tdev->ownership_lock);
 	init_waitqueue_head(&tdev->has_data_wq);
 	init_waitqueue_head(&tdev->has_space_wq);
 	WRITE_ONCE(tdev->shutdown_session,false);
-	telemetry_stats_init(&tdev->stats,capacity);
+	telemetry_stats_init(&tdev->stats,RING_BUF_CAPACITY);
 	tdev->backpressure_policy = bp_policy;
 		
 	/* Initialize char device file */
 	
 	// Allocate device number
 	if ( (ret = alloc_chrdev_region(&tdev->device_num,0,1,"telemetry_rec")) )
-		goto free_ring_buf;
+		goto free_producers;
 		
 	// cdev creation
 	cdev_init(&tdev->cdev, &telemetry_drv_fops);
@@ -336,6 +412,8 @@ del_cdev:
 	cdev_del(&tdev->cdev);
 unreg_chrdev:
 	unregister_chrdev_region(tdev->device_num,1);
+free_producers:
+	kfree(tdev->producers);
 free_ring_buf:	
 	ring_destroy(&tdev->buf);
 free_dev:
@@ -356,7 +434,8 @@ static void __exit telemetry_dev_exit(void)
 	cdev_del(&tdev->cdev);
 	unregister_chrdev_region(tdev->device_num,1);
 	
-	telemetry_producer_stop(&tdev->producer);
+	producers_stop(tdev);
+	kfree(tdev->producers);
 	ring_destroy(&tdev->buf);
 	kfree(tdev);
 	
